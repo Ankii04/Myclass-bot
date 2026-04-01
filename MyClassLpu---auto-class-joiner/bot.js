@@ -190,14 +190,21 @@ class AutoClassBot {
           const minutesToStart = Math.round((startTime - now) / 60000);
 
           if (minutesToStart > 30 && !forceScan) {
-              this.log(`💤 Smart Sleep: Next class "${nextClass.name}" starts in ${minutesToStart} mins. Skipping login.`);
+              this.log(`💤 Smart Sleep: Next class "${nextClass.name}" starts in ${minutesToStart} mins. Closing browser.`);
               this.status = 'sleeping';
+              await this.closeBrowser();
               return { joined: false, action: 'sleep', nextIn: minutesToStart };
           }
       } else if (this.dailyTimetable.length > 0 && !forceScan) {
-          this.log('📴 No more classes today. See you tomorrow!');
+          this.log('📴 No more classes today. Closing browser. See you tomorrow!');
           this.status = 'done_for_day';
+          await this.closeBrowser();
           return { joined: false, action: 'finished' };
+      } else if (this.dailyTimetable.length === 0 && !forceScan) {
+          this.log('🛌 No classes scheduled for today. Closing browser.');
+          this.status = 'no_classes_today';
+          await this.closeBrowser();
+          return { joined: false, action: 'no_classes' };
       }
 
       // 4. Time to work! (Within 30 mins or Ongoing)
@@ -237,7 +244,11 @@ class AutoClassBot {
 
     } catch (e) {
       this.log(`Error: ${e.message}`, 'error');
-      this.isLoggedIn = false;
+      if (e.message.includes('Target closed') || e.message.includes('Session closed')) {
+        this.isLoggedIn = false;
+        this.browser = null;
+        this.page = null;
+      }
       return { joined: false, error: e.message };
     }
   }
@@ -265,6 +276,7 @@ class AutoClassBot {
   }
 
   async clickAndExtractMeetingId(idx) {
+    if (!this.page || this.page.isClosed()) return null;
     await this.page.evaluate((i) => {
         const rows = document.querySelectorAll('tr.fc-list-item');
         if (rows[i]) rows[i].click();
@@ -338,15 +350,32 @@ class AutoClassBot {
     return this.latestScreenshotUrl;
   }
 
-  delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+  async closeBrowser() {
+    if (this.browser) {
+      try {
+        await this.browser.close();
+        this.log('Browser closed successfully.');
+      } catch (e) {
+        this.log(`Error closing browser: ${e.message}`, 'error');
+      } finally {
+        this.browser = null;
+        this.page = null;
+        this.isLoggedIn = false;
+      }
+    }
+  }
+
+  delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
   
   getStatus() {
     return {
       status: this.status,
+      isLoggedIn: this.isLoggedIn,
       lastCheck: this.lastCheck,
       lastJoined: this.lastJoined,
       timetable: this.dailyTimetable,
       logs: this.logs.slice(-20),
+      uptime: process.uptime(),
       currentUrl: this.getCurrentUrl(),
       screenshotAvailable: !!(this.latestScreenshot)
     };
