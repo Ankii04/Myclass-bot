@@ -86,8 +86,8 @@ app.post('/api/trigger', async (req, res) => {
     return res.status(400).json({ error: 'No credentials set.' });
   }
 
-  bot.log('Manual check triggered from dashboard.');
-  const result = await bot.checkAndJoin(credentials.regNumber, credentials.password);
+  bot.log('⚡ Manual check triggered from dashboard. Bypassing sleep timer...');
+  const result = await bot.checkAndJoin(credentials.regNumber, credentials.password, true); // true = forceScan
   res.json(result);
 });
 

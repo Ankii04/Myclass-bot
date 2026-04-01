@@ -143,9 +143,9 @@ class AutoClassBot {
 
   /**
    * SMART CHECK & JOIN
-   * Implements the logic to skip checks when no class is near.
+   * @param {boolean} forceScan - If true, ignores the 30-min sleep logic and performs a live check.
    */
-  async checkAndJoin(regNumber, password) {
+  async checkAndJoin(regNumber, password, forceScan = false) {
     const now = Date.now();
     const today = new Date().toDateString();
 
@@ -153,30 +153,31 @@ class AutoClassBot {
       this.lastCheck = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
       // 1. Check if we need a Daily Sync (First run of the day)
-      if (this.lastDailySync !== today) {
-        this.log('🌅 Morning Sync: Scraping today\'s full schedule...');
+      if (this.lastDailySync !== today || forceScan) {
+        this.log(forceScan ? '⚡ Manual Force Action: Performing live login and sync...' : '🌅 Morning Sync: Scraping today\'s full schedule...');
         const loggedIn = await this.login(regNumber, password);
         if (loggedIn) {
           await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2' });
           await this.switchToListView();
           this.dailyTimetable = await this.scrapeClasses();
           this.lastDailySync = today;
-          this.log(`Sync complete. Found ${this.dailyTimetable.length} classes for today.`);
+          this.log(`Sync complete. Found ${this.dailyTimetable.length} classes.`);
         }
       }
 
       // 2. Are we already in a class?
       if (this.status === 'joined' && this.activeClassEndTime) {
-        if (now < this.activeClassEndTime) {
+        if (now < this.activeClassEndTime && !forceScan) {
           this.log(`In class: ${this.lastJoined.name}. Skipping check.`);
           return { joined: true, action: 'skip' };
         }
-        this.status = 'idle';
-        this.activeClassEndTime = null;
+        if (!forceScan) {
+            this.status = 'idle';
+            this.activeClassEndTime = null;
+        }
       }
 
-      // 3. SMART SLEEP LOGIC
-      // Find the next class start time
+      // 3. SMART SLEEP LOGIC (Bypassed if forceScan is true)
       const upcomingClasses = this.dailyTimetable.filter(c => {
           const startTime = this.parseSingleTime(c.time.split(/[-]|to/i)[0]);
           const endTime = this.parseEndTime(c.time);
@@ -188,13 +189,12 @@ class AutoClassBot {
           const startTime = this.parseSingleTime(nextClass.time.split(/[-]|to/i)[0]);
           const minutesToStart = Math.round((startTime - now) / 60000);
 
-          // If next class is > 30 minutes away, go to sleep
-          if (minutesToStart > 30) {
+          if (minutesToStart > 30 && !forceScan) {
               this.log(`💤 Smart Sleep: Next class "${nextClass.name}" starts in ${minutesToStart} mins. Skipping login.`);
               this.status = 'sleeping';
               return { joined: false, action: 'sleep', nextIn: minutesToStart };
           }
-      } else if (this.dailyTimetable.length > 0) {
+      } else if (this.dailyTimetable.length > 0 && !forceScan) {
           this.log('📴 No more classes today. See you tomorrow!');
           this.status = 'done_for_day';
           return { joined: false, action: 'finished' };
@@ -209,7 +209,6 @@ class AutoClassBot {
       const currentClasses = await this.scrapeClasses();
       this.timetable = currentClasses;
 
-      // Mathematical verify for 'ongoing'
       currentClasses.forEach(c => {
           const times = c.time.split(/[-]|to/i).map(t => this.parseSingleTime(t));
           if (times[0] && times[1] && now >= (times[0] - 10 * 60000) && now < times[1]) {
@@ -227,8 +226,6 @@ class AutoClassBot {
                   this.status = 'joined';
                   this.lastJoined = { name: ongoing.name, time: ongoing.time };
                   this.activeClassEndTime = this.parseEndTime(ongoing.time);
-                  
-                  // EMAIL NOTIFICATION
                   await this.sendNotificationEmail(ongoing.name, ongoing.time, 'JOINED');
                   return { joined: true, name: ongoing.name };
               }
@@ -284,14 +281,12 @@ class AutoClassBot {
     await this.page.goto(joinUrl, { waitUntil: 'networkidle2' });
     await this.delay(5000);
     
-    // Look for Listen Only
-    const clicked = await this.page.evaluate(() => {
+    await this.page.evaluate(() => {
       const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.toLowerCase().includes('listen only'));
-      if (btn) { btn.click(); return true; }
-      return false;
+      if (btn) btn.click();
     });
 
-    return true; // Assume success if navigated
+    return true; 
   }
 
   parseSingleTime(timeStr) {
