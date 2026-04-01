@@ -240,6 +240,7 @@ class AutoClassBot {
       }
 
       this.status = 'waiting';
+      await this.closeBrowser(); // Ensure browser turns OFF after checks
       return { joined: false, action: 'no_active_class_yet' };
 
     } catch (e) {
