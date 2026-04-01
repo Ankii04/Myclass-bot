@@ -334,9 +334,9 @@ class AutoClassBot {
         this.latestScreenshot = b64;
         this.latestScreenshotUrl = this.page.url();
         return b64;
-      } catch (e) { return this.latestScreenshot; }
+      } catch (e) { return null; }
     }
-    return this.latestScreenshot;
+    return null; // Return null if browser is off
   }
 
   /**
@@ -362,6 +362,8 @@ class AutoClassBot {
         this.browser = null;
         this.page = null;
         this.isLoggedIn = false;
+        this.latestScreenshot = null;
+        this.latestScreenshotUrl = null;
       }
     }
   }
