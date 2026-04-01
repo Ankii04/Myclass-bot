@@ -10,6 +10,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.13",
     "puppeteer": "^22.6.0"
   },
   "engines": {
