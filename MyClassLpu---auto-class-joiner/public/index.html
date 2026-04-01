@@ -123,18 +123,13 @@
     const API = '';
     const $ = id => document.getElementById(id);
 
-    setInterval(fetchStatus, 5000);
-    fetchStatus();
-
-    // Auto-refresh screenshot every 2 seconds as requested
-    setInterval(fetchScreenshot, 2000);
-    fetchScreenshot();
+    let isBrowserActive = false;
 
     async function fetchStatus() {
       try {
         const res = await fetch(`${API}/api/status`);
         updateUI(await res.json());
-      } catch {
+      } catch (err) {
         $('statusText').textContent = 'Disconnected';
         $('statusSub').textContent = 'Server offline';
         $('statusDot').className = 'status-dot error';
@@ -147,6 +142,9 @@
       const bar = $('statusBar');
       dot.className = 'status-dot';
       bar.className = 'status-bar';
+      
+      // Determine if browser should be active
+      isBrowserActive = ['joined', 'checking', 'logging_in', 'ongoing'].includes(d.status);
 
       if (!d.botEnabled) {
         dot.classList.add('paused'); bar.classList.add('paused');
@@ -160,44 +158,48 @@
         dot.classList.add('checking');
         $('statusText').textContent = 'Scanning';
         $('statusSub').textContent = d.status === 'logging_in' ? 'Logging in...' : 'Checking classes...';
-      } else if (['logged_in','waiting','no_active_class','no_classes'].includes(d.status)) {
+      } else if (d.status === 'sleeping') {
+        dot.classList.add('checking'); // Use checking style for sleeping (orange)
+        $('statusText').textContent = 'Sleeping';
+        $('statusSub').textContent = 'Waiting for class time';
+      } else if (d.status === 'done_for_day') {
+        dot.classList.add('paused');
+        $('statusText').textContent = 'Finished';
+        $('statusSub').textContent = 'All classes done';
+      } else if (d.status === 'no_classes_today' || d.status === 'no_classes') {
+        dot.classList.add('paused');
+        $('statusText').textContent = 'Idle';
+        $('statusSub').textContent = 'No classes today';
+      } else if (['logged_in','waiting','no_active_class_yet'].includes(d.status)) {
         dot.classList.add('active'); bar.classList.add('active');
         $('statusText').textContent = 'Monitoring';
         $('statusSub').textContent = 'Waiting for class';
       } else if (d.status === 'login_failed' || d.status === 'error') {
         dot.classList.add('error'); bar.classList.add('error');
         $('statusText').textContent = 'Error';
-        $('statusSub').textContent = d.status === 'login_failed' ? 'Invalid credentials' : 'Check logs';
+        $('statusSub').textContent = 'Check activity log';
       } else {
-        if (d.hasCredentials) {
-          dot.classList.add('active'); bar.classList.add('active');
-          $('statusText').textContent = 'Running';
-          $('statusSub').textContent = 'Cron active';
-        } else {
-          $('statusText').textContent = 'Setup Required';
-          $('statusSub').textContent = 'Missing .env config';
-        }
+        dot.classList.add('active');
+        $('statusText').textContent = 'Online';
+        $('statusSub').textContent = 'Ready';
       }
 
       $('lastCheck').textContent = d.lastCheck || 'Never';
       $('lastJoined').textContent = d.lastJoined?.name || 'None';
       $('classCount').textContent = d.timetable?.length || '0';
 
-      const h = Math.floor(d.uptime/3600), m = Math.floor((d.uptime%3600)/60);
-      $('uptime').textContent = `${h}h ${m}m uptime`;
+      if (d.uptime !== undefined) {
+        const h = Math.floor(d.uptime/3600), m = Math.floor((d.uptime%3600)/60);
+        $('uptime').textContent = `${h}h ${m}m uptime`;
+      }
 
-      // Update URL bar from status
       if (d.currentUrl) $('browserUrl').textContent = d.currentUrl;
 
-      // Account info
-      if (d.hasCredentials && d.regNumber) {
-        $('userRegNo').textContent = d.regNumber;
-        $('accountStatus').textContent = 'Configured via .env';
-        $('accountStatus').className = 'success-text';
-      } else {
-        $('userRegNo').textContent = 'Missing Config';
-        $('accountStatus').textContent = 'Add REG_NUMBER & PASSWORD';
-        $('accountStatus').className = 'error-text';
+      // Handle placeholder viz
+      if (!isBrowserActive && !d.screenshotAvailable) {
+        $('browserScreenshot').style.display = 'none';
+        if ($('browserPlaceholder')) $('browserPlaceholder').style.display = 'flex';
+        $('browserUrl').textContent = 'Session inactive';
       }
 
       // Render schedule
@@ -216,6 +218,9 @@
     }
 
     async function fetchScreenshot() {
+      // ONLY FETCH IF BROWSER IS ACTUALLY ACTIVE
+      if (!isBrowserActive) return;
+
       try {
         const res = await fetch(`${API}/api/screenshot`);
         const data = await res.json();
@@ -227,13 +232,20 @@
         } else {
           $('browserScreenshot').style.display = 'none';
           if ($('browserPlaceholder')) $('browserPlaceholder').style.display = 'flex';
-          $('browserUrl').textContent = 'Session inactive';
         }
       } catch {
         $('browserScreenshot').style.display = 'none';
         if ($('browserPlaceholder')) $('browserPlaceholder').style.display = 'flex';
       }
     }
+
+    // Start polling
+    setInterval(fetchStatus, 5000);
+    fetchStatus();
+
+    // Auto-refresh screenshot every 2 seconds ONLY IF ACTIVE
+    setInterval(fetchScreenshot, 2000);
+    fetchScreenshot();
 
     $('toggleBtn').onclick = async () => {
       await fetch(`${API}/api/toggle`, {method:'POST'});
