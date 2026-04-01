@@ -311,6 +311,33 @@ class AutoClassBot {
     return parts.length > 1 ? this.parseSingleTime(parts[1]) : null;
   }
 
+  /**
+   * Take a screenshot of the current page
+   */
+  async takeScreenshot() {
+    if (this.page && !this.page.isClosed()) {
+      try {
+        const b64 = await this.page.screenshot({ encoding: 'base64', type: 'webp', quality: 50 });
+        this.latestScreenshot = b64;
+        this.latestScreenshotUrl = this.page.url();
+        return b64;
+      } catch (e) { return this.latestScreenshot; }
+    }
+    return this.latestScreenshot;
+  }
+
+  /**
+   * Get the current page URL
+   */
+  getCurrentUrl() {
+    try {
+      if (this.page && !this.page.isClosed()) {
+        this.latestScreenshotUrl = this.page.url();
+      }
+    } catch {}
+    return this.latestScreenshotUrl;
+  }
+
   delay(ms) { return new Promise(r => setTimeout(r, ms)); }
   
   getStatus() {
@@ -319,7 +346,9 @@ class AutoClassBot {
       lastCheck: this.lastCheck,
       lastJoined: this.lastJoined,
       timetable: this.dailyTimetable,
-      logs: this.logs.slice(-20)
+      logs: this.logs.slice(-20),
+      currentUrl: this.getCurrentUrl(),
+      screenshotAvailable: !!(this.latestScreenshot)
     };
   }
 }
