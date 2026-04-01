@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoClassJoiner — Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <div class="logo-dot"></div>
+        <h1>AutoClassJoiner</h1>
+      </div>
+      <span class="uptime" id="uptime">0h 0m uptime</span>
+    </header>
+
+    <div class="layout-grid">
+      <!-- Left Column: Controls & Status -->
+      <div class="sidebar">
+        <!-- Status -->
+        <div class="status-bar" id="statusBar">
+          <div class="status-dot" id="statusDot"></div>
+          <div class="status-info">
+            <strong id="statusText">Initializing...</strong>
+            <p id="statusSub">Connecting</p>
+          </div>
+          <button class="icon-btn" id="toggleBtn" title="Toggle Bot">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+          </button>
+        </div>
+
+        <!-- Metrics -->
+        <div class="metrics">
+          <div class="metric">
+            <span class="metric-label">Last Check</span>
+            <span class="metric-value" id="lastCheck">Never</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Last Joined</span>
+            <span class="metric-value" id="lastJoined">None</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Classes</span>
+            <span class="metric-value" id="classCount">0</span>
+          </div>
+        </div>
+
+        <!-- Account Info -->
+        <section class="section account-section">
+          <h2>Account</h2>
+          <div class="account-card">
+            <div class="avatar"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+            <div class="account-details">
+              <strong id="userRegNo">Loading...</strong>
+              <span id="accountStatus">Checking config</span>
+            </div>
+          </div>
+          <p class="hint">Credentials configured via Render environment variables (.env).</p>
+        </section>
+
+        <!-- Actions -->
+        <section class="section">
+          <h2>Actions</h2>
+          <div class="btn-stack">
+            <button class="btn-outline" id="checkNowBtn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+              Force Check Now
+            </button>
+          </div>
+        </section>
+
+        <!-- Schedule -->
+        <section class="section" id="scheduleCard">
+          <div class="section-header">
+            <h2>Today's Classes</h2>
+          </div>
+          <div id="timetable" class="timetable-scroll">
+            <p class="log-empty">Waiting for schedule data...</p>
+          </div>
+        </section>
+      </div>
+
+      <!-- Right Column: Live View & Logs -->
+      <div class="main-content">
+        <!-- Live Browser View -->
+        <section class="section browser-section">
+          <div class="section-header">
+            <div class="header-with-status">
+              <h2>Live Browser View</h2>
+            </div>
+          </div>
+          <p class="url-bar" id="browserUrl">Initializing view...</p>
+          <div class="browser-frame" id="browserFrame">
+            <div class="browser-placeholder" id="browserPlaceholder">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              <span>No browser session active</span>
+            </div>
+            <img id="browserScreenshot" src="" alt="Live browser view" style="display:none;width:100%;height:auto;border-radius:0 0 10px 10px;">
+          </div>
+        </section>
+
+        <!-- Activity Log -->
+        <section class="section log-section">
+          <div class="section-header">
+            <h2>Activity Log</h2>
+            <button class="btn-small" id="clearLogsBtn">Clear</button>
+          </div>
+          <div class="logs" id="logs">
+            <div class="log-empty">Waiting for activity...</div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <footer>AutoClassJoiner Cloud · Secured & Private</footer>
+  </div>
+
+  <script>
+    const API = '';
+    const $ = id => document.getElementById(id);
+
+    setInterval(fetchStatus, 5000);
+    fetchStatus();
+
+    // Auto-refresh screenshot every 2 seconds as requested
+    setInterval(fetchScreenshot, 2000);
+    fetchScreenshot();
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch(`${API}/api/status`);
+        updateUI(await res.json());
+      } catch {
+        $('statusText').textContent = 'Disconnected';
+        $('statusSub').textContent = 'Server offline';
+        $('statusDot').className = 'status-dot error';
+        $('statusBar').className = 'status-bar error';
+      }
+    }
+
+    function updateUI(d) {
+      const dot = $('statusDot');
+      const bar = $('statusBar');
+      dot.className = 'status-dot';
+      bar.className = 'status-bar';
+
+      if (!d.botEnabled) {
+        dot.classList.add('paused'); bar.classList.add('paused');
+        $('statusText').textContent = 'Paused';
+        $('statusSub').textContent = 'Bot is disabled';
+      } else if (d.status === 'joined') {
+        dot.classList.add('active'); bar.classList.add('active');
+        $('statusText').textContent = 'Class Joined';
+        $('statusSub').textContent = d.lastJoined?.name || 'Joined successfully';
+      } else if (d.status === 'checking' || d.status === 'logging_in') {
+        dot.classList.add('checking');
+        $('statusText').textContent = 'Scanning';
+        $('statusSub').textContent = d.status === 'logging_in' ? 'Logging in...' : 'Checking classes...';
+      } else if (['logged_in','waiting','no_active_class','no_classes'].includes(d.status)) {
+        dot.classList.add('active'); bar.classList.add('active');
+        $('statusText').textContent = 'Monitoring';
+        $('statusSub').textContent = 'Waiting for class';
+      } else if (d.status === 'login_failed' || d.status === 'error') {
+        dot.classList.add('error'); bar.classList.add('error');
+        $('statusText').textContent = 'Error';
+        $('statusSub').textContent = d.status === 'login_failed' ? 'Invalid credentials' : 'Check logs';
+      } else {
+        if (d.hasCredentials) {
+          dot.classList.add('active'); bar.classList.add('active');
+          $('statusText').textContent = 'Running';
+          $('statusSub').textContent = 'Cron active';
+        } else {
+          $('statusText').textContent = 'Setup Required';
+          $('statusSub').textContent = 'Missing .env config';
+        }
+      }
+
+      $('lastCheck').textContent = d.lastCheck || 'Never';
+      $('lastJoined').textContent = d.lastJoined?.name || 'None';
+      $('classCount').textContent = d.timetable?.length || '0';
+
+      const h = Math.floor(d.uptime/3600), m = Math.floor((d.uptime%3600)/60);
+      $('uptime').textContent = `${h}h ${m}m uptime`;
+
+      // Update URL bar from status
+      if (d.currentUrl) $('browserUrl').textContent = d.currentUrl;
+
+      // Account info
+      if (d.hasCredentials && d.regNumber) {
+        $('userRegNo').textContent = d.regNumber;
+        $('accountStatus').textContent = 'Configured via .env';
+        $('accountStatus').className = 'success-text';
+      } else {
+        $('userRegNo').textContent = 'Missing Config';
+        $('accountStatus').textContent = 'Add REG_NUMBER & PASSWORD';
+        $('accountStatus').className = 'error-text';
+      }
+
+      // Render schedule
+      if (d.timetable) {
+        $('timetable').innerHTML = d.timetable.length
+          ? d.timetable.map(c => `<div class="class-row ${c.status}"><span class="class-dot ${c.status}"></span><div><strong>${c.name}</strong><br><small>${c.time||'No time'}</small></div><span class="tag ${c.status}">${c.status}</span></div>`).join('')
+          : '<p class="log-empty">No classes scheduled.</p>';
+      }
+
+      // Logs
+      if (d.logs?.length) {
+        $('logs').innerHTML = d.logs.slice().reverse().map(l =>
+          `<div class="log ${l.level}"><span class="log-time">${l.timestamp.split(', ')[1]}</span><span class="log-msg">${l.message}</span></div>`
+        ).join('');
+      }
+    }
+
+    async function fetchScreenshot() {
+      try {
+        const res = await fetch(`${API}/api/screenshot`);
+        const data = await res.json();
+        if (data.image) {
+          $('browserScreenshot').src = `data:image/webp;base64,${data.image}`;
+          $('browserScreenshot').style.display = 'block';
+          if ($('browserPlaceholder')) $('browserPlaceholder').style.display = 'none';
+          if (data.url) $('browserUrl').textContent = data.url;
+        } else {
+          $('browserScreenshot').style.display = 'none';
+          if ($('browserPlaceholder')) $('browserPlaceholder').style.display = 'flex';
+          $('browserUrl').textContent = 'Session inactive';
+        }
+      } catch {
+        $('browserScreenshot').style.display = 'none';
+        if ($('browserPlaceholder')) $('browserPlaceholder').style.display = 'flex';
+      }
+    }
+
+    $('toggleBtn').onclick = async () => {
+      await fetch(`${API}/api/toggle`, {method:'POST'});
+      fetchStatus();
+    };
+
+    $('checkNowBtn').onclick = async () => {
+      $('checkNowBtn').disabled = true;
+      const originalText = $('checkNowBtn').innerHTML;
+      $('checkNowBtn').innerHTML = 'Checking...';
+      try {
+        await fetch(`${API}/api/trigger`, {method:'POST'});
+      } catch {}
+      setTimeout(() => { $('checkNowBtn').disabled = false; $('checkNowBtn').innerHTML = originalText; fetchStatus(); }, 2000);
+    };
+
+    $('clearLogsBtn').onclick = () => {
+      $('logs').innerHTML = '<div class="log-empty">Logs cleared.</div>';
+    };
+  </script>
+</body>
+</html>
