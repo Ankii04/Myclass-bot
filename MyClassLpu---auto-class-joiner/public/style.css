@@ -47,6 +47,7 @@ body {
 .logo { display: flex; align-items: center; gap: 10px; }
 .logo-dot { width: 10px; height: 10px; background: var(--text); border-radius: 50%; flex-shrink: 0; }
 .header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.4px; }
+.header-metrics { display: flex; gap: 16px; align-items: center; }
 .uptime { font-size: 12px; color: var(--muted); font-weight: 500; }
 
 /* ── Layout Grid ── */

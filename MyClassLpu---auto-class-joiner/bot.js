@@ -25,6 +25,10 @@ class AutoClassBot {
     this.latestScreenshot = null;
     this.latestScreenshotUrl = null;
     this.activeClassEndTime = null;
+    this.noClassesFoundToday = false;
+    this.totalActiveMinutes = 0;
+    this.lastActiveMinuteUpdate = Date.now();
+
 
     // Email Config from Env
     this.emailConfig = {
@@ -47,7 +51,7 @@ class AutoClassBot {
           this.latestScreenshot = b64;
           this.latestScreenshotUrl = this.page.url();
         })
-        .catch(() => {});
+        .catch(() => { });
     }
   }
 
@@ -117,18 +121,18 @@ class AutoClassBot {
       this.status = 'logging_in';
       this.log(`Logging in as ${regNumber}...`);
       await this.page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
-      
+
       const userField = await this.page.waitForSelector('input[aria-label="user name"], input[placeholder="Username"]', { timeout: 10000 });
       const passField = await this.page.$('#pwd-field') || await this.page.$('input[type="password"]');
-      
+
       if (!userField || !passField) throw new Error('Login fields not found');
 
       await userField.type(regNumber, { delay: 50 });
       await passField.type(password, { delay: 50 });
-      
+
       await this.page.keyboard.press('Enter');
-      await this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
-      
+      await this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => { });
+
       if (this.page.url().includes('codetantra.com')) {
         this.isLoggedIn = true;
         this.status = 'logged_in';
@@ -152,7 +156,15 @@ class AutoClassBot {
     try {
       this.lastCheck = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-      // 1. Check if we need a Daily Sync (First run of the day)
+      // 0. Skip if we already checked today and found nothing
+      if (this.lastDailySync === today && this.noClassesFoundToday && !forceScan) {
+        this.status = 'no_classes_today';
+        return { joined: false, action: 'skip_no_classes' };
+      }
+
+      this.log(forceScan ? '⚡ Manual check triggered...' : '⏰ Scheduled check triggered.');
+
+
       if (this.lastDailySync !== today || forceScan) {
         this.log(forceScan ? '⚡ Manual Force Action: Performing live login and sync...' : '🌅 Morning Sync: Scraping today\'s full schedule...');
         const loggedIn = await this.login(regNumber, password);
@@ -160,6 +172,7 @@ class AutoClassBot {
           await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2' });
           await this.switchToListView();
           this.dailyTimetable = await this.scrapeClasses();
+          this.noClassesFoundToday = (this.dailyTimetable.length === 0);
           this.lastDailySync = today;
           this.log(`Sync complete. Found ${this.dailyTimetable.length} classes.`);
         }
@@ -172,75 +185,76 @@ class AutoClassBot {
           return { joined: true, action: 'skip' };
         }
         if (!forceScan) {
-            this.status = 'idle';
-            this.activeClassEndTime = null;
+          this.status = 'idle';
+          this.activeClassEndTime = null;
         }
       }
 
       // 3. SMART SLEEP LOGIC (Bypassed if forceScan is true)
       const upcomingClasses = this.dailyTimetable.filter(c => {
-          const startTime = this.parseSingleTime(c.time.split(/[-]|to/i)[0]);
-          const endTime = this.parseEndTime(c.time);
-          return startTime && endTime && now < endTime;
+        const startTime = this.parseSingleTime(c.time.split(/[-]|to/i)[0]);
+        const endTime = this.parseEndTime(c.time);
+        return startTime && endTime && now < endTime;
       });
 
       if (upcomingClasses.length > 0) {
-          const nextClass = upcomingClasses[0];
-          const startTime = this.parseSingleTime(nextClass.time.split(/[-]|to/i)[0]);
-          const minutesToStart = Math.round((startTime - now) / 60000);
+        const nextClass = upcomingClasses[0];
+        const startTime = this.parseSingleTime(nextClass.time.split(/[-]|to/i)[0]);
+        const minutesToStart = Math.round((startTime - now) / 60000);
 
-          if (minutesToStart > 30 && !forceScan) {
-              this.log(`💤 Smart Sleep: Next class "${nextClass.name}" starts in ${minutesToStart} mins. Closing browser.`);
-              this.status = 'sleeping';
-              await this.closeBrowser();
-              return { joined: false, action: 'sleep', nextIn: minutesToStart };
-          }
+        if (minutesToStart > 30 && !forceScan) {
+          this.log(`💤 Smart Sleep: Next class "${nextClass.name}" starts in ${minutesToStart} mins. Closing browser.`);
+          this.status = 'sleeping';
+          await this.closeBrowser();
+          return { joined: false, action: 'sleep', nextIn: minutesToStart };
+        }
       } else if (this.dailyTimetable.length > 0 && !forceScan) {
-          this.log('📴 No more classes today. Closing browser. See you tomorrow!');
-          this.status = 'done_for_day';
-          await this.closeBrowser();
-          return { joined: false, action: 'finished' };
+        this.log('📴 No more classes today. Closing browser. See you tomorrow!');
+        this.status = 'done_for_day';
+        await this.closeBrowser();
+        return { joined: false, action: 'finished' };
       } else if (this.dailyTimetable.length === 0 && !forceScan) {
-          this.log('🛌 No classes scheduled for today. Closing browser.');
-          this.status = 'no_classes_today';
-          await this.closeBrowser();
-          return { joined: false, action: 'no_classes' };
+        this.log('🛌 No classes scheduled for today. Closing browser.');
+        this.status = 'no_classes_today';
+        await this.closeBrowser();
+        return { joined: false, action: 'no_classes' };
       }
 
       // 4. Time to work! (Within 30 mins or Ongoing)
       this.log('⏰ Class approaching or ongoing. Active check starting...');
       if (!this.isLoggedIn) await this.login(regNumber, password);
-      
+
       await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2' });
       await this.switchToListView();
       const currentClasses = await this.scrapeClasses();
       this.timetable = currentClasses;
 
       currentClasses.forEach(c => {
-          const times = c.time.split(/[-]|to/i).map(t => this.parseSingleTime(t));
-          if (times[0] && times[1] && now >= (times[0] - 10 * 60000) && now < times[1]) {
-              c.status = 'ongoing';
-          }
+        const times = c.time.split(/[-]|to/i).map(t => this.parseSingleTime(t));
+        if (times[0] && times[1] && now >= (times[0] - 10 * 60000) && now < times[1]) {
+          c.status = 'ongoing';
+        }
       });
 
       const ongoing = currentClasses.find(c => c.status === 'ongoing');
       if (ongoing) {
-          if (!ongoing.meetingId) ongoing.meetingId = await this.clickAndExtractMeetingId(currentClasses.indexOf(ongoing));
-          
-          if (ongoing.meetingId) {
-              const joined = await this.joinClass(ongoing);
-              if (joined === true) {
-                  this.status = 'joined';
-                  this.lastJoined = { name: ongoing.name, time: ongoing.time };
-                  this.activeClassEndTime = this.parseEndTime(ongoing.time);
-                  await this.sendNotificationEmail(ongoing.name, ongoing.time, 'JOINED');
-                  return { joined: true, name: ongoing.name };
-              }
+        if (!ongoing.meetingId) ongoing.meetingId = await this.clickAndExtractMeetingId(currentClasses.indexOf(ongoing));
+
+        if (ongoing.meetingId) {
+          const joined = await this.joinClass(ongoing);
+          if (joined === true) {
+            this.status = 'joined';
+            this.lastJoined = { name: ongoing.name, time: ongoing.time };
+            this.activeClassEndTime = this.parseEndTime(ongoing.time);
+            await this.sendNotificationEmail(ongoing.name, ongoing.time, 'JOINED');
+            return { joined: true, name: ongoing.name };
           }
+        }
       }
 
       this.status = 'waiting';
       await this.closeBrowser(); // Ensure browser turns OFF after checks
+      this.updateActiveTime(); // Track activity
       return { joined: false, action: 'no_active_class_yet' };
 
     } catch (e) {
@@ -279,13 +293,13 @@ class AutoClassBot {
   async clickAndExtractMeetingId(idx) {
     if (!this.page || this.page.isClosed()) return null;
     await this.page.evaluate((i) => {
-        const rows = document.querySelectorAll('tr.fc-list-item');
-        if (rows[i]) rows[i].click();
+      const rows = document.querySelectorAll('tr.fc-list-item');
+      if (rows[i]) rows[i].click();
     }, idx);
     await this.delay(3000);
     return await this.page.evaluate(() => {
-        const a = document.querySelector('a[href*="m="]');
-        return a ? new URLSearchParams(a.href.split('?')[1]).get('m') : null;
+      const a = document.querySelector('a[href*="m="]');
+      return a ? new URLSearchParams(a.href.split('?')[1]).get('m') : null;
     });
   }
 
@@ -293,13 +307,13 @@ class AutoClassBot {
     const joinUrl = `${BASE_URL}/secure/tla/jnr.jsp?m=${c.meetingId}`;
     await this.page.goto(joinUrl, { waitUntil: 'networkidle2' });
     await this.delay(5000);
-    
+
     await this.page.evaluate(() => {
       const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.toLowerCase().includes('listen only'));
       if (btn) btn.click();
     });
 
-    return true; 
+    return true;
   }
 
   parseSingleTime(timeStr) {
@@ -347,7 +361,7 @@ class AutoClassBot {
       if (this.page && !this.page.isClosed()) {
         this.latestScreenshotUrl = this.page.url();
       }
-    } catch {}
+    } catch { }
     return this.latestScreenshotUrl;
   }
 
@@ -368,9 +382,20 @@ class AutoClassBot {
     }
   }
 
+  updateActiveTime() {
+    const now = Date.now();
+    const diff = now - this.lastActiveMinuteUpdate;
+    if (diff >= 60000) {
+      const mins = Math.floor(diff / 60000);
+      this.totalActiveMinutes += mins;
+      this.lastActiveMinuteUpdate = now - (diff % 60000);
+    }
+  }
+
   delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-  
+
   getStatus() {
+    this.updateActiveTime();
     return {
       status: this.status,
       isLoggedIn: this.isLoggedIn,
@@ -379,6 +404,7 @@ class AutoClassBot {
       timetable: this.dailyTimetable,
       logs: this.logs.slice(-20),
       uptime: process.uptime(),
+      activeMinutes: this.totalActiveMinutes,
       currentUrl: this.getCurrentUrl(),
       screenshotAvailable: !!(this.latestScreenshot)
     };

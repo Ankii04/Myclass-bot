@@ -15,7 +15,11 @@
         <div class="logo-dot"></div>
         <h1>AutoClassJoiner</h1>
       </div>
-      <span class="uptime" id="uptime">0h 0m uptime</span>
+      <div class="header-metrics">
+        <span class="uptime" id="activeTime">0m Active Session</span>
+        <span class="uptime" id="uptime">0h 0m Server Uptime</span>
+      </div>
+
     </header>
 
     <div class="layout-grid">
@@ -69,6 +73,10 @@
             <button class="btn-outline" id="checkNowBtn">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
               Force Check Now
+            </button>
+            <button class="btn-outline" id="testEmailBtn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+              Send Test Email
             </button>
           </div>
         </section>
@@ -190,7 +198,11 @@
 
       if (d.uptime !== undefined) {
         const h = Math.floor(d.uptime/3600), m = Math.floor((d.uptime%3600)/60);
-        $('uptime').textContent = `${h}h ${m}m uptime`;
+        $('uptime').textContent = `${h}h ${m}m Server Uptime`;
+      }
+
+      if (d.activeMinutes !== undefined) {
+        $('activeTime').textContent = `${d.activeMinutes}m Active Session`;
       }
 
       if (d.currentUrl) $('browserUrl').textContent = d.currentUrl;
@@ -260,6 +272,22 @@
         await fetch(`${API}/api/trigger`, {method:'POST'});
       } catch {}
       setTimeout(() => { $('checkNowBtn').disabled = false; $('checkNowBtn').innerHTML = originalText; fetchStatus(); }, 2000);
+    };
+
+    $('testEmailBtn').onclick = async () => {
+      $('testEmailBtn').disabled = true;
+      const originalText = $('testEmailBtn').innerHTML;
+      $('testEmailBtn').innerHTML = 'Sending...';
+      try {
+        const res = await fetch(`${API}/api/test-email`, {method:'POST'});
+        const data = await res.json();
+        alert(data.success ? data.message : 'Error: ' + data.error);
+      } catch {
+        alert('Failed to connect to server.');
+      }
+      $('testEmailBtn').disabled = false;
+      $('testEmailBtn').innerHTML = originalText;
+      fetchStatus();
     };
 
     $('clearLogsBtn').onclick = () => {

@@ -91,6 +91,17 @@ app.post('/api/trigger', async (req, res) => {
   res.json(result);
 });
 
+// Send Test Email
+app.post('/api/test-email', async (req, res) => {
+  bot.log('🧪 Sending a test email...');
+  try {
+    await bot.sendNotificationEmail('Test Class', '12:00 PM', 'TEST');
+    res.json({ success: true, message: 'Test email sent. Check your inbox (and spam).' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Get timetable
 app.get('/api/schedule', (req, res) => {
   res.json({ timetable: bot.timetable });
@@ -205,7 +216,6 @@ function startCronJob() {
 
   // Run every 2 minutes, Monday-Saturday, 8 AM to 10 PM IST
   cronJob = cron.schedule('*/2 8-22 * * 1-6', async () => {
-    bot.log('⏰ Scheduled check triggered.');
     await bot.checkAndJoin(credentials.regNumber, credentials.password);
   }, {
     timezone: 'Asia/Kolkata'
