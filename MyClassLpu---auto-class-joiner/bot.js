@@ -231,7 +231,8 @@ class AutoClassBot {
 
       currentClasses.forEach(c => {
         const times = c.time.split(/[-]|to/i).map(t => this.parseSingleTime(t));
-        if (times[0] && times[1] && now >= (times[0] - 10 * 60000) && now < times[1]) {
+        // Mark as ongoing if within 15 mins before start OR within end time
+        if (times[0] && times[1] && now >= (times[0] - 15 * 60000) && now < times[1]) {
           c.status = 'ongoing';
         }
       });
@@ -326,9 +327,24 @@ class AutoClassBot {
       const ampm = match[3]?.toUpperCase();
       if (ampm === 'PM' && hours < 12) hours += 12;
       if (ampm === 'AM' && hours === 12) hours = 0;
-      const d = new Date();
-      d.setHours(hours, mins, 0, 0);
-      return d.getTime();
+
+      // ── IST FIX ──────────────────────────────────────────────────────────
+      // The scraped times are always IST (Asia/Kolkata = UTC+5:30).
+      // Build the epoch by anchoring to today's IST midnight so the result
+      // is correct even when the server runs in UTC or any other timezone.
+      const nowUtc = Date.now();
+      // IST offset in ms (+5h 30m)
+      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+      // Today's date in IST
+      const todayIst = new Date(nowUtc + IST_OFFSET_MS);
+      // IST midnight for today (UTC epoch of 00:00 IST today)
+      const istMidnightUtc = Date.UTC(
+        todayIst.getUTCFullYear(),
+        todayIst.getUTCMonth(),
+        todayIst.getUTCDate()
+      ) - IST_OFFSET_MS;
+      // Class epoch = IST midnight + class hours/mins — interpreted as IST
+      return istMidnightUtc + (hours * 60 + mins) * 60 * 1000;
     } catch { return null; }
   }
 
