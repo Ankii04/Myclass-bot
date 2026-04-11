@@ -21,6 +21,9 @@ let credentials = {
 let cronJob = null;
 let botEnabled = true;
 
+// BUG 2 FIX: array to track all pending setTimeout timers for scheduled joins
+let scheduledTimers = [];
+
 // Middleware
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -74,6 +77,7 @@ app.post('/api/toggle', (req, res) => {
     bot.log('Bot ENABLED.');
   } else {
     stopCronJob();
+    cancelScheduledTimers();
     bot.log('Bot DISABLED.');
   }
 
@@ -214,14 +218,21 @@ function startCronJob() {
     return;
   }
 
-  // Run every 2 minutes, Monday-Saturday, 8 AM to 10 PM IST
-  cronJob = cron.schedule('*/2 8-22 * * 1-6', async () => {
-    await bot.checkAndJoin(credentials.regNumber, credentials.password);
+  // BUG 2 FIX: Run every 30 minutes (instead of every 2 min) to refresh timetable.
+  // Precise join scheduling is now handled by scheduleUpcomingClasses() via setTimeout.
+  cronJob = cron.schedule('*/30 8-22 * * 1-6', async () => {
+    bot.log('🔄 30-min cron: refreshing timetable and rescheduling...');
+    const result = await bot.checkAndJoin(credentials.regNumber, credentials.password);
+    // After each timetable refresh, reschedule upcoming classes
+    if (bot.dailyTimetable && bot.dailyTimetable.length > 0) {
+      scheduleUpcomingClasses(bot.dailyTimetable);
+    }
+    return result;
   }, {
     timezone: 'Asia/Kolkata'
   });
 
-  bot.log('Cron job started — checking every 2 min (Mon-Sat, 8AM-10PM IST).');
+  bot.log('Cron job started — refreshing timetable every 30 min (Mon-Sat, 8AM-10PM IST).');
 }
 
 function stopCronJob() {
@@ -230,6 +241,125 @@ function stopCronJob() {
     cronJob = null;
     bot.log('Cron job stopped.');
   }
+}
+
+// ========== BUG 2 FIX: Smart Class Scheduling ==========
+
+/**
+ * Cancel all pending scheduled join timers.
+ */
+function cancelScheduledTimers() {
+  if (scheduledTimers.length > 0) {
+    scheduledTimers.forEach(t => clearTimeout(t));
+    bot.log(`🗑️ Cancelled ${scheduledTimers.length} pending scheduled join timer(s).`);
+    scheduledTimers = [];
+  }
+}
+
+/**
+ * scheduleUpcomingClasses(classes)
+ * For each class that has not ended and is not already ongoing, schedules a
+ * join attempt 5 minutes before its start time (if within the next 4 hours).
+ */
+function scheduleUpcomingClasses(classes) {
+  if (!botEnabled || !credentials.regNumber || !credentials.password) return;
+
+  // Cancel any previously scheduled timers first
+  cancelScheduledTimers();
+
+  const now = Date.now();
+  const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+  const FIVE_MIN_MS = 5 * 60 * 1000;
+
+  classes.forEach(classInfo => {
+    const startMs = bot.parseSingleTime(classInfo.time.split(/[-]|to/i)[0]);
+    const endMs = bot.parseEndTime(classInfo.time);
+
+    // Skip classes that have already ended
+    if (!startMs || (endMs && now >= endMs)) return;
+
+    // Skip classes already ongoing (they will be joined in the current check cycle)
+    if (classInfo.status === 'ongoing') return;
+
+    // Calculate delay to 5 minutes before start
+    const delay = (startMs - FIVE_MIN_MS) - now;
+
+    if (delay > 0 && delay < FOUR_HOURS_MS) {
+      const delayMin = Math.round(delay / 60000);
+      bot.log(`📅 Scheduling join attempt for "${classInfo.name}" in ${delayMin} min(s).`);
+      const timer = setTimeout(() => {
+        retryJoinUntilSuccess(classInfo);
+      }, delay);
+      scheduledTimers.push(timer);
+    } else if (delay <= 0) {
+      bot.log(`⏭️ "${classInfo.name}" is imminent or already past — skipping scheduler (will join via active check).`);
+    } else {
+      bot.log(`⏭️ "${classInfo.name}" starts in more than 4 hours — skipping scheduler for now.`);
+    }
+  });
+}
+
+/**
+ * retryJoinUntilSuccess(classInfo, retryCount)
+ * Calls bot.checkAndJoin and retries every 45 seconds if too early,
+ * stops on success, error, or after 20 attempts.
+ */
+async function retryJoinUntilSuccess(classInfo, retryCount = 0) {
+  const MAX_RETRIES = 20;
+
+  if (!botEnabled) {
+    bot.log(`🚫 Bot disabled — aborting retry for "${classInfo.name}".`);
+    return;
+  }
+
+  if (!credentials.regNumber || !credentials.password) {
+    bot.log('🚫 No credentials — aborting retry.', 'warn');
+    return;
+  }
+
+  // Check if class end time has already passed
+  const endMs = bot.parseEndTime(classInfo.time);
+  if (endMs && Date.now() >= endMs) {
+    bot.log(`⏰ "${classInfo.name}" has ended — stopping retries.`);
+    return;
+  }
+
+  if (retryCount >= MAX_RETRIES) {
+    bot.log(`🛑 Max retries (${MAX_RETRIES}) reached for "${classInfo.name}" — giving up.`, 'warn');
+    return;
+  }
+
+  bot.log(`🔁 Retry attempt ${retryCount + 1}/${MAX_RETRIES} for "${classInfo.name}"...`);
+  let result;
+  try {
+    result = await bot.checkAndJoin(credentials.regNumber, credentials.password);
+    // Re-schedule upcoming classes after every timetable refresh
+    if (bot.dailyTimetable && bot.dailyTimetable.length > 0) {
+      scheduleUpcomingClasses(bot.dailyTimetable);
+    }
+  } catch (e) {
+    bot.log(`Error during retry for "${classInfo.name}": ${e.message}`, 'error');
+    result = { joined: false, status: 'error' };
+  }
+
+  if (result.joined === true) {
+    bot.log(`✅ Successfully joined "${classInfo.name}" on retry ${retryCount + 1}.`);
+    return;
+  }
+
+  if (result.status === 'error') {
+    bot.log(`❌ Error joining "${classInfo.name}" — stopping retries.`, 'error');
+    return;
+  }
+
+  if (result.status === 'too_early' || result.action === 'no_active_class_yet') {
+    bot.log(`⏳ Too early for "${classInfo.name}" — retrying in 45 seconds (attempt ${retryCount + 1}).`);
+    const timer = setTimeout(() => {
+      retryJoinUntilSuccess(classInfo, retryCount + 1);
+    }, 45 * 1000);
+    scheduledTimers.push(timer);
+  }
+  // All other outcomes (sleep, finished, no_classes, skip) — stop retrying
 }
 
 // ========== Self-Ping (Keep Alive on Render Free Tier) ==========
@@ -252,7 +382,7 @@ function startSelfPing() {
 
 // ========== Start Server ==========
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`\n🚀 AutoClassJoiner Cloud Bot running on port ${PORT}`);
   console.log(`📊 Dashboard: http://localhost:${PORT}\n`);
 
@@ -261,6 +391,17 @@ app.listen(PORT, () => {
   // Start cron if credentials are available
   if (credentials.regNumber && credentials.password) {
     startCronJob();
+
+    // BUG 2 FIX: Run an immediate timetable scrape on startup, then schedule classes
+    bot.log('🚀 Startup: Running initial timetable sync...');
+    try {
+      await bot.checkAndJoin(credentials.regNumber, credentials.password);
+      if (bot.dailyTimetable && bot.dailyTimetable.length > 0) {
+        scheduleUpcomingClasses(bot.dailyTimetable);
+      }
+    } catch (e) {
+      bot.log(`Startup sync failed: ${e.message}`, 'error');
+    }
   } else {
     bot.log('No credentials in env vars. Set them via the dashboard or env: REG_NUMBER, PASSWORD');
   }
@@ -273,6 +414,7 @@ app.listen(PORT, () => {
 process.on('SIGTERM', async () => {
   bot.log('Shutting down...');
   stopCronJob();
+  cancelScheduledTimers();
   await bot.closeBrowser();
   process.exit(0);
 });
@@ -280,6 +422,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   bot.log('Shutting down (SIGINT)...');
   stopCronJob();
+  cancelScheduledTimers();
   await bot.closeBrowser();
   process.exit(0);
 });

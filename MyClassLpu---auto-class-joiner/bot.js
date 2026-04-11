@@ -229,10 +229,15 @@ class AutoClassBot {
       const currentClasses = await this.scrapeClasses();
       this.timetable = currentClasses;
 
+      // BUG 1 FIX (step 3): Apply time-based override to ALL classes regardless of scraped status
+      // This ensures classes marked "unknown" by the CSS-color scraper still get detected as ongoing
       currentClasses.forEach(c => {
         const times = c.time.split(/[-]|to/i).map(t => this.parseSingleTime(t));
         // Mark as ongoing if within 15 mins before start OR within end time
         if (times[0] && times[1] && now >= (times[0] - 15 * 60000) && now < times[1]) {
+          if (c.status !== 'ongoing') {
+            this.log(`⏱️ Time-override: marking "${c.name}" as ongoing (was: ${c.status})`);
+          }
           c.status = 'ongoing';
         }
       });
@@ -256,7 +261,7 @@ class AutoClassBot {
       this.status = 'waiting';
       await this.closeBrowser(); // Ensure browser turns OFF after checks
       this.updateActiveTime(); // Track activity
-      return { joined: false, action: 'no_active_class_yet' };
+      return { joined: false, action: 'no_active_class_yet', status: 'too_early' };
 
     } catch (e) {
       this.log(`Error: ${e.message}`, 'error');
@@ -265,7 +270,7 @@ class AutoClassBot {
         this.browser = null;
         this.page = null;
       }
-      return { joined: false, error: e.message };
+      return { joined: false, error: e.message, status: 'error' };
     }
   }
 
@@ -277,43 +282,218 @@ class AutoClassBot {
     await this.delay(2000);
   }
 
+  /**
+   * scrapeClasses — improved version
+   * BUG 1 FIX (steps 1 & 2):
+   *   - If any cell in the row contains "Join" or "Join Now" text → status = 'ongoing'
+   *   - If any <a href> in the row contains "jnr.jsp" → status = 'ongoing', extract meetingId from that href
+   *   - Falls back to original CSS-color dot detection last (was unreliable)
+   */
   async scrapeClasses() {
     return await this.page.evaluate(() => {
       const results = [];
       document.querySelectorAll('tr.fc-list-item').forEach(row => {
         const time = row.querySelector('.fc-list-item-time')?.textContent.trim() || '';
         const name = row.querySelector('.fc-list-item-title')?.textContent.trim() || '';
-        const link = row.querySelector('a[href*="m="]');
-        const meetingId = link ? new URLSearchParams(link.href.split('?')[1]).get('m') : '';
-        results.push({ name, time, meetingId, status: 'scheduled' });
+
+        // ── Detect meetingId from standard m= param link ──────────────────
+        const mLink = row.querySelector('a[href*="m="]');
+        let meetingId = mLink ? new URLSearchParams(mLink.href.split('?')[1]).get('m') : '';
+
+        // ── BUG 1 FIX step 2: detect direct join link (jnr.jsp) ──────────
+        const jnrLink = row.querySelector('a[href*="jnr.jsp"]');
+        let status = 'scheduled';
+        if (jnrLink) {
+          status = 'ongoing';
+          // Extract meetingId from jnr.jsp?m=XXXX
+          const jnrParams = new URLSearchParams(jnrLink.href.split('?')[1] || '');
+          if (jnrParams.get('m')) meetingId = jnrParams.get('m');
+        }
+
+        // ── BUG 1 FIX step 1: detect "Join" / "Join Now" button text ─────
+        if (status !== 'ongoing') {
+          const allText = row.innerText || '';
+          const joinMatch = allText.match(/\bJoin(\s+Now)?\b/i);
+          if (joinMatch) {
+            status = 'ongoing';
+          }
+        }
+
+        // ── Original CSS-color dot fallback (kept for extra signal) ───────
+        if (status !== 'ongoing') {
+          const dot = row.querySelector('.fc-list-item-marker span');
+          if (dot) {
+            const bg = window.getComputedStyle(dot).backgroundColor;
+            // Green shades used by CodeTantra for live/ongoing classes
+            if (bg && (bg.includes('0, 128') || bg.includes('0, 200') || bg.includes('34, 139'))) {
+              status = 'ongoing';
+            } else if (bg) {
+              status = 'upcoming';
+            }
+          }
+        }
+
+        results.push({ name, time, meetingId, status });
       });
       return results;
     });
   }
 
+  /**
+   * clickAndExtractMeetingId — improved version
+   * BUG 1 FIX (step 4):
+   *   - After clicking and waiting 2s, search ALL iframes for jnr.jsp or mi.jsp links
+   *   - Navigate back to TIMETABLE_URL before returning so subsequent calls work
+   */
   async clickAndExtractMeetingId(idx) {
     if (!this.page || this.page.isClosed()) return null;
+
+    // Click the row to open detail panel/modal
     await this.page.evaluate((i) => {
       const rows = document.querySelectorAll('tr.fc-list-item');
       if (rows[i]) rows[i].click();
     }, idx);
-    await this.delay(3000);
-    return await this.page.evaluate(() => {
+    await this.delay(2000);
+
+    // First try: find meetingId in the main document
+    let meetingId = await this.page.evaluate(() => {
+      // Look for jnr.jsp link (direct join) first
+      const jnr = document.querySelector('a[href*="jnr.jsp"]');
+      if (jnr) {
+        const p = new URLSearchParams(jnr.href.split('?')[1] || '');
+        if (p.get('m')) return p.get('m');
+      }
+      // Fallback: standard m= param link
       const a = document.querySelector('a[href*="m="]');
       return a ? new URLSearchParams(a.href.split('?')[1]).get('m') : null;
     });
+
+    // BUG 1 FIX step 4: if not found in main doc, search all iframes
+    if (!meetingId) {
+      this.log('Meeting ID not found in main document — searching iframes...');
+      try {
+        const frames = this.page.frames();
+        for (const frame of frames) {
+          try {
+            const id = await frame.evaluate(() => {
+              // Check for jnr.jsp or mi.jsp links inside this frame
+              const jnr = document.querySelector('a[href*="jnr.jsp"]');
+              if (jnr) {
+                const p = new URLSearchParams(jnr.href.split('?')[1] || '');
+                if (p.get('m')) return p.get('m');
+              }
+              const mi = document.querySelector('a[href*="mi.jsp"]');
+              if (mi) {
+                const p = new URLSearchParams(mi.href.split('?')[1] || '');
+                if (p.get('m')) return p.get('m');
+              }
+              const a = document.querySelector('a[href*="m="]');
+              return a ? new URLSearchParams(a.href.split('?')[1]).get('m') : null;
+            });
+            if (id) {
+              meetingId = id;
+              this.log(`Meeting ID found in iframe: ${id}`);
+              break;
+            }
+          } catch { /* frame may be cross-origin, skip */ }
+        }
+      } catch (e) {
+        this.log(`iframe search error: ${e.message}`, 'warn');
+      }
+    }
+
+    // BUG 1 FIX step 4: navigate back to timetable so the page stays usable
+    try {
+      await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2', timeout: 15000 });
+      await this.switchToListView();
+    } catch (e) {
+      this.log(`Could not navigate back to timetable: ${e.message}`, 'warn');
+    }
+
+    return meetingId || null;
   }
 
+  /**
+   * joinClass — improved version
+   * BUG 1 FIX (step 5):
+   *   - After navigating to jnr.jsp, wait for BBB redirect OR "joining" body text
+   *     using page.waitForFunction (30s timeout) instead of a blind delay(5000).
+   *   - Keep all 4 retries for the Listen Only button with iframe search.
+   */
   async joinClass(c) {
     const joinUrl = `${BASE_URL}/secure/tla/jnr.jsp?m=${c.meetingId}`;
-    await this.page.goto(joinUrl, { waitUntil: 'networkidle2' });
-    await this.delay(5000);
+    this.log(`🔗 Navigating to join URL: ${joinUrl}`);
+    await this.page.goto(joinUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-    await this.page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.toLowerCase().includes('listen only'));
-      if (btn) btn.click();
-    });
+    // BUG 1 FIX step 5: wait for BBB redirect or body text rather than fixed delay
+    try {
+      await this.page.waitForFunction(
+        () => {
+          // Condition 1: redirected to BigBlueButton
+          if (window.location.href.includes('bigbluebutton')) return true;
+          // Condition 2: page body says we are joining
+          const body = document.body ? document.body.innerText.toLowerCase() : '';
+          if (body.includes('you are joining') || body.includes('joining the session')) return true;
+          // Condition 3: a Listen Only button has appeared (BBB client loaded)
+          const listenBtn = Array.from(document.querySelectorAll('button')).find(
+            b => b.innerText.toLowerCase().includes('listen only')
+          );
+          if (listenBtn) return true;
+          return false;
+        },
+        { timeout: 30000, polling: 1000 }
+      );
+      this.log('✅ Join page confirmed — BBB session detected.');
+    } catch {
+      // If timeout, page may still have loaded — proceed anyway
+      this.log('⚠️ Join confirmation timed out — attempting Listen Only anyway.', 'warn');
+    }
 
+    // Try clicking Listen Only button with 4 retries + iframe search (kept from original)
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      // Search main document first
+      const clicked = await this.page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button')).find(
+          b => b.innerText.toLowerCase().includes('listen only')
+        );
+        if (btn) { btn.click(); return true; }
+        return false;
+      });
+
+      if (clicked) {
+        this.log(`🎧 Listen Only clicked (attempt ${attempt}, main doc).`);
+        return true;
+      }
+
+      // Search all iframes for Listen Only button
+      let iframeClicked = false;
+      try {
+        const frames = this.page.frames();
+        for (const frame of frames) {
+          try {
+            const result = await frame.evaluate(() => {
+              const btn = Array.from(document.querySelectorAll('button')).find(
+                b => b.innerText.toLowerCase().includes('listen only')
+              );
+              if (btn) { btn.click(); return true; }
+              return false;
+            });
+            if (result) {
+              this.log(`🎧 Listen Only clicked (attempt ${attempt}, iframe).`);
+              iframeClicked = true;
+              break;
+            }
+          } catch { /* cross-origin frame — skip */ }
+        }
+      } catch { }
+
+      if (iframeClicked) return true;
+
+      this.log(`Listen Only not found yet (attempt ${attempt}/4). Waiting 3s...`);
+      await this.delay(3000);
+    }
+
+    this.log('⚠️ Listen Only button not found after 4 attempts — returning true anyway.', 'warn');
     return true;
   }
 
