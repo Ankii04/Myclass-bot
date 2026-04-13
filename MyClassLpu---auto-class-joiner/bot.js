@@ -29,6 +29,8 @@ class AutoClassBot {
     this.totalActiveMinutes = 0;
     this.lastActiveMinuteUpdate = Date.now();
 
+    // FIX: prevent concurrent checkAndJoin calls from racing
+    this.isRunning = false;
 
     // Email Config from Env
     this.emailConfig = {
@@ -55,9 +57,6 @@ class AutoClassBot {
     }
   }
 
-  /**
-   * Send Email Notification
-   */
   async sendNotificationEmail(className, time, action = 'JOINED') {
     if (!this.emailConfig.recipient || !this.emailConfig.sender || !this.emailConfig.pass) {
       this.log('Email notifications skipped: Credentials missing in env vars.', 'warn');
@@ -101,13 +100,25 @@ class AutoClassBot {
       } catch {
         this.browser = null;
         this.page = null;
+        this.isLoggedIn = false;
       }
     }
 
     this.log('Launching browser...');
     this.browser = await puppeteer.launch({
       headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process', '--no-zygote'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process',
+        '--no-zygote',
+        '--disable-extensions',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding'
+      ],
       defaultViewport: { width: 1280, height: 720 }
     });
 
@@ -122,22 +133,52 @@ class AutoClassBot {
       this.log(`Logging in as ${regNumber}...`);
       await this.page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
 
-      const userField = await this.page.waitForSelector('input[aria-label="user name"], input[placeholder="Username"]', { timeout: 10000 });
-      const passField = await this.page.$('#pwd-field') || await this.page.$('input[type="password"]');
+      // FIX: broader selector set + longer timeout (was 10s, now 15s)
+      const userField = await this.page.waitForSelector(
+        'input[aria-label="user name"], input[placeholder="Username"], input[name="i"]',
+        { timeout: 15000 }
+      );
+      const passField =
+        await this.page.$('#pwd-field') ||
+        await this.page.$('input[aria-label="password"]') ||
+        await this.page.$('input[placeholder="Password"]') ||
+        await this.page.$('input[name="p"]') ||
+        await this.page.$('input[type="password"]');
 
       if (!userField || !passField) throw new Error('Login fields not found');
 
+      await userField.click({ clickCount: 3 });
       await userField.type(regNumber, { delay: 50 });
+      await passField.click({ clickCount: 3 });
       await passField.type(password, { delay: 50 });
 
-      await this.page.keyboard.press('Enter');
-      await this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => { });
+      // FIX: click Login button by text first, fallback to Enter
+      let clicked = false;
+      const buttons = await this.page.$$('button');
+      for (const btn of buttons) {
+        const text = await this.page.evaluate(el => el.textContent.trim().toLowerCase(), btn);
+        if (text === 'login' || text === 'sign in') {
+          await btn.click();
+          clicked = true;
+          break;
+        }
+      }
+      if (!clicked) await this.page.keyboard.press('Enter');
 
-      if (this.page.url().includes('codetantra.com')) {
+      await this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => { });
+
+      // Extra wait for redirect chain
+      await this.delay(3000);
+      const finalUrl = this.page.url();
+
+      if (finalUrl.includes('codetantra.com') || finalUrl.includes('/secure/')) {
         this.isLoggedIn = true;
         this.status = 'logged_in';
+        this.log('Login successful!');
         return true;
       }
+
+      this.log(`Login status unclear. URL: ${finalUrl}`, 'warn');
       return false;
     } catch (e) {
       this.log(`Login failed: ${e.message}`, 'error');
@@ -147,29 +188,37 @@ class AutoClassBot {
 
   /**
    * SMART CHECK & JOIN
-   * @param {boolean} forceScan - If true, ignores the 30-min sleep logic and performs a live check.
+   * FIX: isRunning guard prevents two concurrent calls from racing (which crashes login)
    */
   async checkAndJoin(regNumber, password, forceScan = false) {
+    // FIX: guard against concurrent execution
+    if (this.isRunning && !forceScan) {
+      this.log('⚠️ Already running a check — skipping this trigger.', 'warn');
+      return { joined: false, action: 'busy' };
+    }
+    this.isRunning = true;
+
     const now = Date.now();
     const today = new Date().toDateString();
 
     try {
       this.lastCheck = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-      // 0. Skip if we already checked today and found nothing
       if (this.lastDailySync === today && this.noClassesFoundToday && !forceScan) {
         this.status = 'no_classes_today';
+        this.isRunning = false;
         return { joined: false, action: 'skip_no_classes' };
       }
 
       this.log(forceScan ? '⚡ Manual check triggered...' : '⏰ Scheduled check triggered.');
 
-
       if (this.lastDailySync !== today || forceScan) {
-        this.log(forceScan ? '⚡ Manual Force Action: Performing live login and sync...' : '🌅 Morning Sync: Scraping today\'s full schedule...');
+        this.log(forceScan
+          ? '⚡ Manual Force Action: Performing live login and sync...'
+          : '🌅 Morning Sync: Scraping today\'s full schedule...');
         const loggedIn = await this.login(regNumber, password);
         if (loggedIn) {
-          await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2' });
+          await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2', timeout: 30000 });
           await this.switchToListView();
           this.dailyTimetable = await this.scrapeClasses();
           this.noClassesFoundToday = (this.dailyTimetable.length === 0);
@@ -178,10 +227,10 @@ class AutoClassBot {
         }
       }
 
-      // 2. Are we already in a class?
       if (this.status === 'joined' && this.activeClassEndTime) {
         if (now < this.activeClassEndTime && !forceScan) {
-          this.log(`In class: ${this.lastJoined.name}. Skipping check.`);
+          this.log(`In class: ${this.lastJoined?.name}. Skipping check.`);
+          this.isRunning = false;
           return { joined: true, action: 'skip' };
         }
         if (!forceScan) {
@@ -190,7 +239,6 @@ class AutoClassBot {
         }
       }
 
-      // 3. SMART SLEEP LOGIC (Bypassed if forceScan is true)
       const upcomingClasses = this.dailyTimetable.filter(c => {
         const startTime = this.parseSingleTime(c.time.split(/[-]|to/i)[0]);
         const endTime = this.parseEndTime(c.time);
@@ -206,34 +254,53 @@ class AutoClassBot {
           this.log(`💤 Smart Sleep: Next class "${nextClass.name}" starts in ${minutesToStart} mins. Closing browser.`);
           this.status = 'sleeping';
           await this.closeBrowser();
+          this.isRunning = false;
           return { joined: false, action: 'sleep', nextIn: minutesToStart };
         }
       } else if (this.dailyTimetable.length > 0 && !forceScan) {
         this.log('📴 No more classes today. Closing browser. See you tomorrow!');
         this.status = 'done_for_day';
         await this.closeBrowser();
+        this.isRunning = false;
         return { joined: false, action: 'finished' };
       } else if (this.dailyTimetable.length === 0 && !forceScan) {
         this.log('🛌 No classes scheduled for today. Closing browser.');
         this.status = 'no_classes_today';
         await this.closeBrowser();
+        this.isRunning = false;
         return { joined: false, action: 'no_classes' };
       }
 
-      // 4. Time to work! (Within 30 mins or Ongoing)
       this.log('⏰ Class approaching or ongoing. Active check starting...');
-      if (!this.isLoggedIn) await this.login(regNumber, password);
+      if (!this.isLoggedIn) {
+        const ok = await this.login(regNumber, password);
+        if (!ok) {
+          this.isRunning = false;
+          return { joined: false, error: 'Login failed' };
+        }
+      }
 
-      await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2' });
+      await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+
+      // FIX: detect & handle session expiry
+      if (this.page.url().includes('myclass.lpu.in') || this.page.url().includes('login')) {
+        this.log('Session expired — re-logging in...', 'warn');
+        this.isLoggedIn = false;
+        const ok = await this.login(regNumber, password);
+        if (!ok) {
+          this.isRunning = false;
+          return { joined: false, error: 'Re-login failed' };
+        }
+        await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+      }
+
       await this.switchToListView();
       const currentClasses = await this.scrapeClasses();
       this.timetable = currentClasses;
 
-      // BUG 1 FIX (step 3): Apply time-based override to ALL classes regardless of scraped status
-      // This ensures classes marked "unknown" by the CSS-color scraper still get detected as ongoing
+      // Time-based status override (15 min before start → end)
       currentClasses.forEach(c => {
         const times = c.time.split(/[-]|to/i).map(t => this.parseSingleTime(t));
-        // Mark as ongoing if within 15 mins before start OR within end time
         if (times[0] && times[1] && now >= (times[0] - 15 * 60000) && now < times[1]) {
           if (c.status !== 'ongoing') {
             this.log(`⏱️ Time-override: marking "${c.name}" as ongoing (was: ${c.status})`);
@@ -244,7 +311,9 @@ class AutoClassBot {
 
       const ongoing = currentClasses.find(c => c.status === 'ongoing');
       if (ongoing) {
-        if (!ongoing.meetingId) ongoing.meetingId = await this.clickAndExtractMeetingId(currentClasses.indexOf(ongoing));
+        if (!ongoing.meetingId) {
+          ongoing.meetingId = await this.clickAndExtractMeetingId(currentClasses.indexOf(ongoing));
+        }
 
         if (ongoing.meetingId) {
           const joined = await this.joinClass(ongoing);
@@ -253,122 +322,214 @@ class AutoClassBot {
             this.lastJoined = { name: ongoing.name, time: ongoing.time };
             this.activeClassEndTime = this.parseEndTime(ongoing.time);
             await this.sendNotificationEmail(ongoing.name, ongoing.time, 'JOINED');
+            this.isRunning = false;
             return { joined: true, name: ongoing.name };
           }
+          if (joined === 'TOO_EARLY') {
+            this.status = 'waiting';
+            this.isRunning = false;
+            return { joined: false, status: 'too_early', action: 'no_active_class_yet' };
+          }
+        } else {
+          this.log('⚠️ Could not extract meetingId — cannot join.', 'warn');
         }
       }
 
       this.status = 'waiting';
-      await this.closeBrowser(); // Ensure browser turns OFF after checks
-      this.updateActiveTime(); // Track activity
+      await this.closeBrowser();
+      this.updateActiveTime();
+      this.isRunning = false;
       return { joined: false, action: 'no_active_class_yet', status: 'too_early' };
 
     } catch (e) {
       this.log(`Error: ${e.message}`, 'error');
-      if (e.message.includes('Target closed') || e.message.includes('Session closed')) {
+      if (e.message.includes('Target closed') || e.message.includes('Session closed') || e.message.includes('detached')) {
         this.isLoggedIn = false;
         this.browser = null;
         this.page = null;
       }
+      this.isRunning = false;
       return { joined: false, error: e.message, status: 'error' };
     }
   }
 
   async switchToListView() {
-    await this.page.evaluate(() => {
-      const btn = document.querySelector('.fc-listView-button') || document.querySelector('button[title="list view"]');
-      if (btn) btn.click();
-    });
-    await this.delay(2000);
+    try {
+      await this.page.evaluate(() => {
+        const btn = document.querySelector('.fc-listView-button') ||
+          document.querySelector('.fc-listWeek-button') ||
+          document.querySelector('button[title="list view"]');
+        if (btn && !btn.classList.contains('fc-state-active') && !btn.classList.contains('fc-button-active')) {
+          btn.click();
+        }
+      });
+      await this.delay(2000);
+    } catch (e) {
+      this.log(`Could not switch to list view: ${e.message}`, 'warn');
+    }
   }
 
   /**
-   * scrapeClasses — improved version
-   * BUG 1 FIX (steps 1 & 2):
-   *   - If any cell in the row contains "Join" or "Join Now" text → status = 'ongoing'
-   *   - If any <a href> in the row contains "jnr.jsp" → status = 'ongoing', extract meetingId from that href
-   *   - Falls back to original CSS-color dot detection last (was unreliable)
+   * scrapeClasses — detects ongoing via jnr.jsp link, Join text, CSS color dot
+   * FIX: added Method 2 from original repo — scan entire page for mi.jsp/jnr.jsp links
    */
   async scrapeClasses() {
     return await this.page.evaluate(() => {
       const results = [];
-      document.querySelectorAll('tr.fc-list-item').forEach(row => {
-        const time = row.querySelector('.fc-list-item-time')?.textContent.trim() || '';
-        const name = row.querySelector('.fc-list-item-title')?.textContent.trim() || '';
 
-        // ── Detect meetingId from standard m= param link ──────────────────
-        const mLink = row.querySelector('a[href*="m="]');
-        let meetingId = mLink ? new URLSearchParams(mLink.href.split('?')[1]).get('m') : '';
+      const extractId = (str) => {
+        if (!str) return '';
+        const m = str.match(/[?&]m=([a-f0-9-]+)/i);
+        return m ? m[1] : '';
+      };
 
-        // ── BUG 1 FIX step 2: detect direct join link (jnr.jsp) ──────────
+      // Method 1: List view rows
+      document.querySelectorAll('tr.fc-list-item, tr.fc-list-event').forEach(row => {
+        const timeCell = row.querySelector('td.fc-list-item-time, td.fc-list-event-time');
+        const titleCell = row.querySelector('td.fc-list-item-title, td.fc-list-event-title');
+        const markerCell = row.querySelector('td.fc-list-item-marker, td.fc-list-event-dot-cell');
+
+        if (!titleCell) return;
+
+        const link = titleCell.querySelector('a');
+        const time = timeCell ? timeCell.textContent.trim() : '';
+        const name = link ? link.textContent.trim() : titleCell.textContent.trim();
+
+        let meetingId = '';
+        if (link) {
+          meetingId = extractId(link.href) ||
+            extractId(link.getAttribute('onclick') || '') ||
+            link.getAttribute('data-meeting') || '';
+        }
+        if (!meetingId) {
+          const anyLink = row.querySelector('[href*="mi.jsp"],[href*="jnr.jsp"],[onclick*="jnr.jsp"]');
+          if (anyLink) meetingId = extractId(anyLink.href || '') || extractId(anyLink.getAttribute('onclick') || '');
+        }
+        if (!meetingId) {
+          meetingId = row.getAttribute('data-id') || row.getAttribute('data-event-id') || '';
+        }
+
+        // Detect status: jnr.jsp link first
         const jnrLink = row.querySelector('a[href*="jnr.jsp"]');
         let status = 'scheduled';
         if (jnrLink) {
           status = 'ongoing';
-          // Extract meetingId from jnr.jsp?m=XXXX
-          const jnrParams = new URLSearchParams(jnrLink.href.split('?')[1] || '');
-          if (jnrParams.get('m')) meetingId = jnrParams.get('m');
+          const p = new URLSearchParams(jnrLink.href.split('?')[1] || '');
+          if (p.get('m')) meetingId = p.get('m');
         }
 
-        // ── BUG 1 FIX step 1: detect "Join" / "Join Now" button text ─────
+        // Detect via "Join" text
         if (status !== 'ongoing') {
-          const allText = row.innerText || '';
-          const joinMatch = allText.match(/\bJoin(\s+Now)?\b/i);
-          if (joinMatch) {
-            status = 'ongoing';
-          }
+          if (/\bJoin(\s+Now)?\b/i.test(row.innerText || '')) status = 'ongoing';
         }
 
-        // ── Original CSS-color dot fallback (kept for extra signal) ───────
-        if (status !== 'ongoing') {
-          const dot = row.querySelector('.fc-list-item-marker span');
+        // Detect via CSS color dot
+        if (status !== 'ongoing' && markerCell) {
+          const dot = markerCell.querySelector('.fc-event-dot, .fc-list-event-dot') ||
+            markerCell.querySelector('span');
           if (dot) {
             const bg = window.getComputedStyle(dot).backgroundColor;
-            // Green shades used by CodeTantra for live/ongoing classes
-            if (bg && (bg.includes('0, 128') || bg.includes('0, 200') || bg.includes('34, 139'))) {
-              status = 'ongoing';
-            } else if (bg) {
-              status = 'upcoming';
+            const match = bg && bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+            if (match) {
+              const [, r, g, b] = match.map(Number);
+              if (g > 100 && g > r * 1.5 && g > b * 1.5) status = 'ongoing';
+              else if (Math.abs(r - g) < 30 && Math.abs(g - b) < 30 && r > 80 && r < 200) status = 'ended';
+              else status = 'upcoming';
             }
           }
         }
 
         results.push({ name, time, meetingId, status });
       });
+
+      // Method 2: Scan ENTIRE page for any mi.jsp or jnr.jsp links (original repo fallback)
+      document.querySelectorAll('a[href*="mi.jsp"], a[href*="jnr.jsp"]').forEach(link => {
+        const mId = extractId(link.href);
+        if (!mId) return;
+        const existing = results.find(c => c.meetingId === mId);
+        if (!existing) {
+          results.push({
+            name: link.textContent.trim() || 'Live Class',
+            time: '',
+            meetingId: mId,
+            status: link.href.includes('jnr.jsp') ? 'ongoing' : 'unknown'
+          });
+        } else if (link.href.includes('jnr.jsp')) {
+          existing.status = 'ongoing';
+        }
+      });
+
       return results;
     });
   }
 
   /**
-   * clickAndExtractMeetingId — improved version
-   * BUG 1 FIX (step 4):
-   *   - After clicking and waiting 2s, search ALL iframes for jnr.jsp or mi.jsp links
-   *   - Navigate back to TIMETABLE_URL before returning so subsequent calls work
+   * clickAndExtractMeetingId
+   * FIX 1: wait 5s instead of 2s for popup to render
+   * FIX 2: search popup/modal selectors (from original repo)
+   * FIX 3: check URL after click for meetingId
+   * FIX 4: navigate back safely — only if not already on timetable
    */
   async clickAndExtractMeetingId(idx) {
     if (!this.page || this.page.isClosed()) return null;
 
-    // Click the row to open detail panel/modal
     await this.page.evaluate((i) => {
-      const rows = document.querySelectorAll('tr.fc-list-item');
-      if (rows[i]) rows[i].click();
+      const rows = document.querySelectorAll('tr.fc-list-item, tr.fc-list-event');
+      if (!rows[i]) return;
+      const titleLink = rows[i].querySelector('td.fc-list-item-title a, td.fc-list-event-title a');
+      if (titleLink) titleLink.click();
+      else rows[i].click();
     }, idx);
-    await this.delay(2000);
 
-    // First try: find meetingId in the main document
+    // FIX: wait longer for popup to render (was 2s → 5s)
+    await this.delay(5000);
+
+    // Try main document (popup selectors first, then full page scan)
     let meetingId = await this.page.evaluate(() => {
-      // Look for jnr.jsp link (direct join) first
+      const extractId = (str) => {
+        if (!str) return '';
+        const m = str.match(/[?&]m=([a-f0-9-]+)/i);
+        return m ? m[1] : '';
+      };
+
+      // Check popup/modal selectors first (from original repo)
+      const popupSelectors = [
+        '.fc-popover a', '.modal a', '.popup a',
+        '[class*="popover"] a', '[class*="modal"] a', '[class*="dialog"] a'
+      ];
+      for (const sel of popupSelectors) {
+        for (const a of document.querySelectorAll(sel)) {
+          const id = extractId(a.href);
+          if (id) return id;
+        }
+      }
+
       const jnr = document.querySelector('a[href*="jnr.jsp"]');
       if (jnr) {
         const p = new URLSearchParams(jnr.href.split('?')[1] || '');
         if (p.get('m')) return p.get('m');
       }
-      // Fallback: standard m= param link
-      const a = document.querySelector('a[href*="m="]');
-      return a ? new URLSearchParams(a.href.split('?')[1]).get('m') : null;
+
+      const mi = document.querySelector('a[href*="mi.jsp"]');
+      if (mi) return extractId(mi.href);
+
+      for (const a of document.querySelectorAll('a[href*="m="]')) {
+        const id = extractId(a.href);
+        if (id) return id;
+      }
+      return null;
     });
 
-    // BUG 1 FIX step 4: if not found in main doc, search all iframes
+    // FIX: check if page navigated and has meetingId in URL
+    if (!meetingId) {
+      const urlId = (this.page.url().match(/[?&]m=([a-f0-9-]+)/i) || [])[1];
+      if (urlId) {
+        this.log(`Meeting ID found in URL after click: ${urlId}`);
+        meetingId = urlId;
+      }
+    }
+
+    // Search all iframes
     if (!meetingId) {
       this.log('Meeting ID not found in main document — searching iframes...');
       try {
@@ -376,17 +537,15 @@ class AutoClassBot {
         for (const frame of frames) {
           try {
             const id = await frame.evaluate(() => {
-              // Check for jnr.jsp or mi.jsp links inside this frame
+              const extractId = (str) => {
+                if (!str) return '';
+                const m = str.match(/[?&]m=([a-f0-9-]+)/i);
+                return m ? m[1] : '';
+              };
               const jnr = document.querySelector('a[href*="jnr.jsp"]');
-              if (jnr) {
-                const p = new URLSearchParams(jnr.href.split('?')[1] || '');
-                if (p.get('m')) return p.get('m');
-              }
+              if (jnr) return extractId(jnr.href);
               const mi = document.querySelector('a[href*="mi.jsp"]');
-              if (mi) {
-                const p = new URLSearchParams(mi.href.split('?')[1] || '');
-                if (p.get('m')) return p.get('m');
-              }
+              if (mi) return extractId(mi.href);
               const a = document.querySelector('a[href*="m="]');
               return a ? new URLSearchParams(a.href.split('?')[1]).get('m') : null;
             });
@@ -395,17 +554,20 @@ class AutoClassBot {
               this.log(`Meeting ID found in iframe: ${id}`);
               break;
             }
-          } catch { /* frame may be cross-origin, skip */ }
+          } catch { /* cross-origin frame */ }
         }
       } catch (e) {
         this.log(`iframe search error: ${e.message}`, 'warn');
       }
     }
 
-    // BUG 1 FIX step 4: navigate back to timetable so the page stays usable
+    // FIX: navigate back safely — only if not already on timetable
     try {
-      await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2', timeout: 15000 });
-      await this.switchToListView();
+      const curUrl = this.page.url();
+      if (!curUrl.includes('m.jsp')) {
+        await this.page.goto(TIMETABLE_URL, { waitUntil: 'networkidle2', timeout: 20000 });
+        await this.switchToListView();
+      }
     } catch (e) {
       this.log(`Could not navigate back to timetable: ${e.message}`, 'warn');
     }
@@ -414,78 +576,99 @@ class AutoClassBot {
   }
 
   /**
-   * joinClass — improved version
-   * BUG 1 FIX (step 5):
-   *   - After navigating to jnr.jsp, wait for BBB redirect OR "joining" body text
-   *     using page.waitForFunction (30s timeout) instead of a blind delay(5000).
-   *   - Keep all 4 retries for the Listen Only button with iframe search.
+   * joinClass — navigate to jnr.jsp, detect too_early/too_late, click Listen Only
+   * FIX: returns 'TOO_EARLY' so retryJoinUntilSuccess handles it correctly
    */
   async joinClass(c) {
     const joinUrl = `${BASE_URL}/secure/tla/jnr.jsp?m=${c.meetingId}`;
     this.log(`🔗 Navigating to join URL: ${joinUrl}`);
-    await this.page.goto(joinUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-    // BUG 1 FIX step 5: wait for BBB redirect or body text rather than fixed delay
+    try {
+      await this.page.goto(joinUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+    } catch (e) {
+      this.log(`Navigation timeout — checking page state anyway: ${e.message}`, 'warn');
+    }
+
+    await this.delay(5000);
+
+    // Check page content for too-early / too-late
+    let pageText = '';
+    try {
+      pageText = (await this.page.evaluate(() => document.body?.innerText || '')).toLowerCase();
+    } catch { }
+
+    if (pageText.includes('too late') || pageText.includes('already ended') || pageText.includes('class has ended')) {
+      this.log('⚠️ Class has already ended.', 'warn');
+      return false;
+    }
+
+    if (pageText.includes('too early') || pageText.includes('not yet open') ||
+      pageText.includes('cannot join') || pageText.includes('meeting not started')) {
+      this.log('⏳ Teacher hasn\'t started the meeting yet (Too early).');
+      return 'TOO_EARLY';
+    }
+
+    // Wait for BBB redirect or join page
     try {
       await this.page.waitForFunction(
         () => {
-          // Condition 1: redirected to BigBlueButton
           if (window.location.href.includes('bigbluebutton')) return true;
-          // Condition 2: page body says we are joining
           const body = document.body ? document.body.innerText.toLowerCase() : '';
           if (body.includes('you are joining') || body.includes('joining the session')) return true;
-          // Condition 3: a Listen Only button has appeared (BBB client loaded)
           const listenBtn = Array.from(document.querySelectorAll('button')).find(
-            b => b.innerText.toLowerCase().includes('listen only')
+            b => (b.innerText || '').toLowerCase().includes('listen only')
           );
-          if (listenBtn) return true;
-          return false;
+          return !!listenBtn;
         },
         { timeout: 30000, polling: 1000 }
       );
       this.log('✅ Join page confirmed — BBB session detected.');
     } catch {
-      // If timeout, page may still have loaded — proceed anyway
-      this.log('⚠️ Join confirmation timed out — attempting Listen Only anyway.', 'warn');
+      this.log('⚠️ BBB confirmation timed out — attempting Listen Only anyway.', 'warn');
     }
 
-    // Try clicking Listen Only button with 4 retries + iframe search (kept from original)
-    for (let attempt = 1; attempt <= 4; attempt++) {
-      // Search main document first
-      const clicked = await this.page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('button')).find(
-          b => b.innerText.toLowerCase().includes('listen only')
-        );
-        if (btn) { btn.click(); return true; }
-        return false;
-      });
+    // Try clicking Listen Only in main doc + all iframes, 4 attempts
+    const tryClickListenOnly = async (frame) => {
+      try {
+        return await frame.evaluate(() => {
+          const selectors = [
+            'button[data-test="listenOnlyBtn"]',
+            'button[aria-label="Listen only"]',
+            'button[aria-label="listen only"]',
+            'button[title="Listen only"]',
+          ];
+          for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (el) { el.click(); return `selector:${sel}`; }
+          }
+          const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+          const btn = btns.find(b => {
+            const label = (b.getAttribute('aria-label') || b.getAttribute('title') || b.textContent || '').toLowerCase();
+            return label.includes('listen only') || label.includes('listen-only');
+          });
+          if (btn) { btn.click(); return `text:${btn.textContent.trim().slice(0, 30)}`; }
+          return null;
+        });
+      } catch { return null; }
+    };
 
-      if (clicked) {
-        this.log(`🎧 Listen Only clicked (attempt ${attempt}, main doc).`);
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const mainResult = await tryClickListenOnly(this.page.mainFrame());
+      if (mainResult) {
+        this.log(`🎧 Listen Only clicked (attempt ${attempt}, main doc: ${mainResult}).`);
         return true;
       }
 
-      // Search all iframes for Listen Only button
       let iframeClicked = false;
-      try {
-        const frames = this.page.frames();
-        for (const frame of frames) {
-          try {
-            const result = await frame.evaluate(() => {
-              const btn = Array.from(document.querySelectorAll('button')).find(
-                b => b.innerText.toLowerCase().includes('listen only')
-              );
-              if (btn) { btn.click(); return true; }
-              return false;
-            });
-            if (result) {
-              this.log(`🎧 Listen Only clicked (attempt ${attempt}, iframe).`);
-              iframeClicked = true;
-              break;
-            }
-          } catch { /* cross-origin frame — skip */ }
+      for (const frame of this.page.frames()) {
+        if (frame === this.page.mainFrame()) continue;
+        const result = await tryClickListenOnly(frame);
+        if (result) {
+          this.log(`🎧 Listen Only clicked (attempt ${attempt}, iframe: ${result}).`);
+          iframeClicked = true;
+          break;
         }
-      } catch { }
+      }
 
       if (iframeClicked) return true;
 
@@ -500,30 +683,22 @@ class AutoClassBot {
   parseSingleTime(timeStr) {
     if (!timeStr) return null;
     try {
-      const match = timeStr.trim().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+      const match = timeStr.trim().match(/(\d{1,2}):(\d{2})\s*(AM|PM|a\.m\.|p\.m\.)?/i);
       if (!match) return null;
       let hours = parseInt(match[1]);
       const mins = parseInt(match[2]);
-      const ampm = match[3]?.toUpperCase();
+      const ampm = match[3]?.toUpperCase().replace(/\./g, '');
       if (ampm === 'PM' && hours < 12) hours += 12;
       if (ampm === 'AM' && hours === 12) hours = 0;
+      if (!ampm && hours < 8) hours += 12; // infer PM for morning classes
 
-      // ── IST FIX ──────────────────────────────────────────────────────────
-      // The scraped times are always IST (Asia/Kolkata = UTC+5:30).
-      // Build the epoch by anchoring to today's IST midnight so the result
-      // is correct even when the server runs in UTC or any other timezone.
-      const nowUtc = Date.now();
-      // IST offset in ms (+5h 30m)
       const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-      // Today's date in IST
-      const todayIst = new Date(nowUtc + IST_OFFSET_MS);
-      // IST midnight for today (UTC epoch of 00:00 IST today)
+      const todayIst = new Date(Date.now() + IST_OFFSET_MS);
       const istMidnightUtc = Date.UTC(
         todayIst.getUTCFullYear(),
         todayIst.getUTCMonth(),
         todayIst.getUTCDate()
       ) - IST_OFFSET_MS;
-      // Class epoch = IST midnight + class hours/mins — interpreted as IST
       return istMidnightUtc + (hours * 60 + mins) * 60 * 1000;
     } catch { return null; }
   }
@@ -534,9 +709,6 @@ class AutoClassBot {
     return parts.length > 1 ? this.parseSingleTime(parts[1]) : null;
   }
 
-  /**
-   * Take a screenshot of the current page
-   */
   async takeScreenshot() {
     if (this.page && !this.page.isClosed()) {
       try {
@@ -546,12 +718,9 @@ class AutoClassBot {
         return b64;
       } catch (e) { return null; }
     }
-    return null; // Return null if browser is off
+    return null;
   }
 
-  /**
-   * Get the current page URL
-   */
   getCurrentUrl() {
     try {
       if (this.page && !this.page.isClosed()) {
