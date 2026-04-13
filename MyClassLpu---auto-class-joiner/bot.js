@@ -117,8 +117,12 @@ class AutoClassBot {
         '--disable-extensions',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding'
+        '--disable-renderer-backgrounding',
+        '--ignore-certificate-errors',         // FIX: bypass SSL cert errors on Render
+        '--ignore-certificate-errors-spki-list',
+        '--allow-insecure-localhost',
       ],
+      ignoreHTTPSErrors: true,                 // FIX: Puppeteer-level SSL bypass
       defaultViewport: { width: 1280, height: 720 }
     });
 
