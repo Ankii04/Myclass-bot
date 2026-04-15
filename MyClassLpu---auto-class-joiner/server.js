@@ -75,15 +75,6 @@ app.post('/api/trigger', async (req, res) => {
   res.json(result);
 });
 
-app.post('/api/test-email', async (req, res) => {
-  try {
-    await bot.sendNotificationEmail('Test Class', '12:00 PM', 'TEST');
-    res.json({ success: true, message: 'Test email sent. Check inbox/spam.' });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
 app.get('/api/schedule', (req, res) =>
   res.json({ timetable: bot.dailyTimetable }));
 

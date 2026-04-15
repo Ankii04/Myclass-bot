@@ -1,10 +1,4 @@
-/**
- * AutoClassJoiner - Advanced Cloud Bot (Puppeteer)
- * Features: Smart Scheduling, Email Notifications, Headless Automation
- */
-
 const puppeteer = require('puppeteer');
-const nodemailer = require('nodemailer');
 
 const LOGIN_URL = 'https://myclass.lpu.in';
 const BASE_URL = 'https://lovelyprofessionaluniversity.codetantra.com';
@@ -29,15 +23,7 @@ class AutoClassBot {
     this.totalActiveMinutes = 0;
     this.lastActiveMinuteUpdate = Date.now();
 
-    // FIX: prevent concurrent checkAndJoin calls from racing
     this.isRunning = false;
-
-    // Email Config from Env
-    this.emailConfig = {
-      recipient: process.env.NOTIFICATION_EMAIL || '',
-      sender: process.env.SENDER_EMAIL || '',
-      pass: process.env.SENDER_PASS || ''
-    };
   }
 
   log(message, level = 'info') {
@@ -54,41 +40,6 @@ class AutoClassBot {
           this.latestScreenshotUrl = this.page.url();
         })
         .catch(() => { });
-    }
-  }
-
-  async sendNotificationEmail(className, time, action = 'JOINED') {
-    if (!this.emailConfig.recipient || !this.emailConfig.sender || !this.emailConfig.pass) {
-      this.log('Email notifications skipped: Credentials missing in env vars.', 'warn');
-      return;
-    }
-
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: this.emailConfig.sender, pass: this.emailConfig.pass }
-    });
-
-    const mailOptions = {
-      from: `"AutoClass Bot" <${this.emailConfig.sender}>`,
-      to: this.emailConfig.recipient,
-      subject: `🎓 Class ${action}: ${className}`,
-      html: `
-        <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
-          <h2 style="color: #2e7d32;">Class ${action === 'JOINED' ? 'Joined Successfully ✅' : 'Update'}</h2>
-          <p><strong>Class:</strong> ${className}</p>
-          <p><strong>Time:</strong> ${time}</p>
-          <p><strong>Status:</strong> The bot is currently in the session and "listening."</p>
-          <hr/>
-          <p style="font-size: 12px; color: #888;">Live status available on your Render Dashboard.</p>
-        </div>
-      `
-    };
-
-    try {
-      await transporter.sendMail(mailOptions);
-      this.log(`📧 Notification email sent to ${this.emailConfig.recipient}`);
-    } catch (error) {
-      this.log(`Failed to send email: ${error.message}`, 'error');
     }
   }
 
@@ -325,7 +276,6 @@ class AutoClassBot {
             this.status = 'joined';
             this.lastJoined = { name: ongoing.name, time: ongoing.time };
             this.activeClassEndTime = this.parseEndTime(ongoing.time);
-            await this.sendNotificationEmail(ongoing.name, ongoing.time, 'JOINED');
             this.isRunning = false;
             return { joined: true, name: ongoing.name };
           }
