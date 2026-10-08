@@ -79,6 +79,11 @@ app.get('/api/schedule', (req, res) =>
   res.json({ timetable: bot.dailyTimetable }));
 
 app.get('/api/screenshot', async (req, res) => {
+  // If bot is busy (checkAndJoin running), return cached screenshot instantly
+  // to avoid request pile-up while the browser is navigating
+  if (bot.isRunning) {
+    return res.json({ image: bot.latestScreenshot || null, url: bot.getCurrentUrl() });
+  }
   const screenshot = await bot.takeScreenshot();
   res.json({ image: screenshot || null, url: bot.getCurrentUrl() });
 });

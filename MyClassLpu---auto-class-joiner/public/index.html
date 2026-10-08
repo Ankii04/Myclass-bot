@@ -128,6 +128,7 @@
     const $ = id => document.getElementById(id);
 
     let isBrowserActive = false;
+    let screenshotInFlight = false;
 
     async function fetchStatus() {
       try {
@@ -226,11 +227,15 @@
     }
 
     async function fetchScreenshot() {
-      // ONLY FETCH IF BROWSER IS ACTUALLY ACTIVE
-      if (!isBrowserActive) return;
+      // Skip if browser is not active or a request is already in-flight
+      if (!isBrowserActive || screenshotInFlight) return;
+
+      screenshotInFlight = true;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout
 
       try {
-        const res = await fetch(`${API}/api/screenshot`);
+        const res = await fetch(`${API}/api/screenshot`, { signal: controller.signal });
         const data = await res.json();
         if (data.image) {
           $('browserScreenshot').src = `data:image/webp;base64,${data.image}`;
@@ -244,6 +249,9 @@
       } catch {
         $('browserScreenshot').style.display = 'none';
         if ($('browserPlaceholder')) $('browserPlaceholder').style.display = 'flex';
+      } finally {
+        clearTimeout(timeout);
+        screenshotInFlight = false;
       }
     }
 
