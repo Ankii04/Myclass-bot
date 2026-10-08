@@ -148,7 +148,7 @@
       bar.className = 'status-bar';
       
       // Determine if browser should be active
-      isBrowserActive = ['joined', 'checking', 'logging_in', 'ongoing'].includes(d.status);
+      isBrowserActive = ['joined', 'checking', 'logging_in', 'ongoing', 'waiting', 'logged_in', 'no_active_class_yet'].includes(d.status);
 
       if (!d.botEnabled) {
         dot.classList.add('paused'); bar.classList.add('paused');
