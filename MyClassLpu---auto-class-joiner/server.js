@@ -257,6 +257,60 @@ function schedulePreClassTimers(classes) {
 }
 
 /**
+ * Helper — find the next class in the daily timetable that starts at or after `afterMs`
+ */
+function getNextClass(afterMs) {
+  const upcoming = bot.dailyTimetable
+    .map(c => ({
+      c,
+      startMs: bot.parseSingleTime(c.time.split(/[-]|to/i)[0]),
+      endMs:   bot.parseEndTime(c.time)
+    }))
+    .filter(({ startMs, endMs }) => startMs && endMs && endMs > afterMs)
+    .sort((a, b) => a.startMs - b.startMs);
+  return upcoming.length > 0 ? upcoming[0] : null;
+}
+
+/**
+ * Chain to the next class after the current one ends.
+ * Called 30 s before the current class end.
+ */
+async function chainToNextClass(currentClass) {
+  bot.log(`🔄 Leaving "${currentClass.name}" 30 s early to prepare for next class.`);
+
+  // Close (leave) current class
+  await bot.closeBrowser();
+  bot.status = 'sleeping';
+
+  // Find next class whose end is after right now
+  const now = Date.now();
+  const next = getNextClass(now);
+
+  if (!next) {
+    bot.log('📴 No more classes today after this one. All done! See you tomorrow!');
+    bot.status = 'done_for_day';
+    return;
+  }
+
+  const { c: nextClass, startMs, endMs } = next;
+  bot.log(`➡️  Next class: "${nextClass.name}" (${nextClass.time}). Starting pre-class polling now.`);
+
+  // If next class starts more than 10 min from now, wait until 10 min before it
+  const wakeMs  = startMs - 10 * 60 * 1000;
+  const delayMs = wakeMs - Date.now();
+
+  if (delayMs > 0) {
+    const wakeTime = new Date(wakeMs).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' });
+    bot.log(`⏰ Sleeping until ${wakeTime} (10 min before "${nextClass.name}").`);
+    const timer = setTimeout(() => startPollingForClass(nextClass, endMs), delayMs);
+    scheduledTimers.push(timer);
+  } else {
+    // Already within 10-min window or class already started
+    startPollingForClass(nextClass, endMs);
+  }
+}
+
+/**
  * STEP 3 — Poll every 5 minutes until class is joined or ends
  */
 function startPollingForClass(classInfo, endMs) {
@@ -280,21 +334,20 @@ function startPollingForClass(classInfo, endMs) {
 
 /**
  * STEP 4 — Single join attempt
- * On success: stop polling, schedule sleep timer at class end
- * On class ended: stop polling, sleep
+ * On success: stop polling, schedule "leave 30 s before end" timer, then chain to next class.
+ * On class ended: stop polling, chain to next class.
  */
 async function tryJoinClass(classInfo, endMs) {
   if (!botEnabled) return;
 
   const now = Date.now();
 
-  // Class has ended
+  // Class has ended (past end time)
   if (now >= endMs) {
-    bot.log(`🎓 "${classInfo.name}" has ended. Going to sleep.`);
+    bot.log(`🎓 "${classInfo.name}" has ended.`);
     clearInterval(activePollingInterval);
     activePollingInterval = null;
-    await bot.closeBrowser();
-    bot.status = 'sleeping';
+    await chainToNextClass(classInfo);
     return;
   }
 
@@ -315,22 +368,30 @@ async function tryJoinClass(classInfo, endMs) {
   }
 
   if (result.joined === true) {
-    bot.log(`✅ Joined "${classInfo.name}"! Stopping poll. Sleeping until class ends.`);
+    bot.log(`✅ Joined "${classInfo.name}"! Stopping poll.`);
 
     // Stop the 5-min polling
     clearInterval(activePollingInterval);
     activePollingInterval = null;
 
-    // Schedule a sleep timer at class end time
-    const msUntilEnd = endMs - Date.now();
-    if (msUntilEnd > 0) {
-      bot.log(`💤 Will sleep in ${Math.round(msUntilEnd / 60000)} minutes when class ends.`);
-      const endTimer = setTimeout(async () => {
-        bot.log(`🎓 "${classInfo.name}" class time is over. Closing browser.`);
-        await bot.closeBrowser();
-        bot.status = 'sleeping';
-      }, msUntilEnd);
-      scheduledTimers.push(endTimer);
+    // Schedule exit 30 s before end, then chain to next class
+    const LEAVE_EARLY_MS = 30 * 1000; // 30 seconds
+    const msUntilLeave   = endMs - Date.now() - LEAVE_EARLY_MS;
+
+    if (msUntilLeave > 0) {
+      const leaveTime = new Date(endMs - LEAVE_EARLY_MS)
+        .toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' });
+      bot.log(`⏳ Will leave "${classInfo.name}" at ${leaveTime} (30 s before end) and join the next class.`);
+
+      const leaveTimer = setTimeout(async () => {
+        await chainToNextClass(classInfo);
+      }, msUntilLeave);
+      scheduledTimers.push(leaveTimer);
+
+    } else {
+      // Less than 30 s left — leave and chain immediately
+      bot.log(`⚡ Less than 30 s left in "${classInfo.name}" — leaving and chaining immediately.`);
+      await chainToNextClass(classInfo);
     }
 
   } else if (result.status === 'too_early' || result.action === 'no_active_class_yet') {
