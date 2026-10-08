@@ -229,13 +229,19 @@ function schedulePreClassTimers(classes) {
     const startMs = bot.parseSingleTime(classInfo.time.split(/[-]|to/i)[0]);
     const endMs   = bot.parseEndTime(classInfo.time);
 
-    if (!startMs || !endMs) {
-      bot.log(`⚠️ Could not parse time for "${classInfo.name}" — skipping.`, 'warn');
+    if (!startMs) {
+      bot.log(`⚠️ Could not parse start time for "${classInfo.name}" — skipping.`, 'warn');
       return;
     }
+    // If end time is missing, assume 1-hour class duration as fallback
+    const DEFAULT_DURATION_MS = 60 * 60 * 1000; // 1 hour
+    if (!endMs) {
+      bot.log(`⚠️ No end time for "${classInfo.name}" — assuming 1-hour duration.`, 'warn');
+    }
+    const effectiveEndMs = endMs || (startMs + DEFAULT_DURATION_MS);
 
     // Already ended
-    if (now >= endMs) {
+    if (now >= effectiveEndMs) {
       bot.log(`⏭️ "${classInfo.name}" has already ended — skipping.`);
       return;
     }
@@ -249,14 +255,14 @@ function schedulePreClassTimers(classes) {
       bot.log(`⏰ "${classInfo.name}" — will wake at ${wakeTime} (10 min before class).`);
 
       const timer = setTimeout(() => {
-        startPollingForClass(classInfo, endMs);
+        startPollingForClass(classInfo, effectiveEndMs);
       }, delayMs);
       scheduledTimers.push(timer);
 
-    } else if (now < endMs) {
+    } else if (now < effectiveEndMs) {
       // Within 10-min window or class already started — start polling now
       bot.log(`⚡ "${classInfo.name}" is within 10-min window — starting polling now.`);
-      startPollingForClass(classInfo, endMs);
+      startPollingForClass(classInfo, effectiveEndMs);
     }
   });
 }
